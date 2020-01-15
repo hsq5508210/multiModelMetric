@@ -3,7 +3,7 @@
 import tensorflow as tf
 import math
 from tensorflow.python.platform import flags
-from utils import conv_block, distance, mse, get_dist_category, get_acc, intra_dist, inter_dist
+from utils import conv_block, distance, mse, compute_loss, get_dist_category, get_acc, intra_dist, inter_dist
 FLAGS = flags.FLAGS
 
 
@@ -37,8 +37,7 @@ class Model:
             output_q = self.forward(self.query_x, weights, reuse=resuse)
             predict = self.category_choose(output_q, output_s,  support_y)
             accurcy = get_acc(predict, query_y)
-            intradist =
-            task_losses = \
+            task_losses = tf.map_fn(fn=lambda qxy:compute_loss(qxy, output_s, support_y), elems=(output_s,query_y))
 
         return task_losses, accurcy
 
