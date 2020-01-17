@@ -1,8 +1,10 @@
 #-*-coding:utf-8-*-
+from tensorflow.python import debug as tf_debug
 from tensorflow.python.platform import flags
 from data_generator import DataGenerator
 from model import Model
 import tensorflow as tf
+import utils
 from tqdm import tqdm
 FLAGS = flags.FLAGS
 ##config dataset
@@ -26,48 +28,56 @@ flags.DEFINE_bool("max_pool", default=True, help="use maxpool or not")
 
 
 ##config train
-flags.DEFINE_integer("episode_tr", default=10, help="the total number of training episodes.")
+flags.DEFINE_integer("episode_tr", default=3000, help="the total number of training episodes.")
 flags.DEFINE_integer("episode_val", default=1000, help="the total number of evaluate episodes.")
 flags.DEFINE_integer("episode_ts", default=1000, help="the total number of testing episodes.")
 flags.DEFINE_integer("support_num", default=1, help="Num of support per class per model.")
 flags.DEFINE_integer("query_num", default=1, help="Num of query per class per model.")
 flags.DEFINE_integer("way_num", default=5, help="the number of classify ways.")
-flags.DEFINE_integer("iteration", default=60000, help="iterations.")
+flags.DEFINE_integer("iteration", default=10000, help="iterations.")
 flags.DEFINE_float("lr", default=0.001, help="learning rate.")
 flags.DEFINE_bool("train", default=True, help="Train or not.")
 flags.DEFINE_bool("lr_decay", default=True, help="lr_decay or not.")
 flags.DEFINE_bool("visualize", default=True, help="visualize or not.")
 flags.DEFINE_float("decay_rate", default=0.999, help="learning rate decay rate.")
-flags.DEFINE_string("model_path", default="log/model_checkpoint/metric_s1_q1_checkpoint")
+flags.DEFINE_string("model_path", default="log/model_checkpoint/metric_s1_q1_checkpoint", help="model's path.")
 FLAGS = flags.FLAGS
 
-def visualize(sess):
-    writer = tf.summary.FileWriter("log/", sess.graph)
-    tf.global_variables_initializer().run()
+def visualize(sess, graph=False):
+    if graph:
+        writer = tf.summary.FileWriter("log/", sess.graph)
+    # tf.global_variables_initializer().run()
     writer.close()
 
 def train(model, data_generator):
     sess = tf.InteractiveSession()
     saver = tf.train.Saver()
     all_task = data_generator.make_data_tensor()
-    trainop, loss = model.trainop()
+    trainop, acc_loss = model.trainop()
     tf.global_variables_initializer().run()
     print("training...")
     bestacc = 0.0
     for i in range(FLAGS.iteration):
         l, a = 0, 0
-        for j in tqdm(range(FLAGS.episode)):
+        for j in tqdm(range(FLAGS.episode_tr)):
             task = all_task[j]
             feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
                         model.support_y: task['support_set'][1], model.query_y: task['query_set'][1]}
             with sess.as_default():
-                _, la = sess.run([trainop, loss], feed_dic)
-                l += la[0]
-                a += la[1]
-                if(i == 0 and j == 0 and FLAGS.visualize):
-                    visualize(sess)
-                if FLAGS.lr_decay: model.decay()
-        print("\n epoch %d loss is %f, acc is %f"%(i,l/FLAGS.episode, a/FLAGS.episode))
+                _, la = sess.run([trainop, acc_loss], feed_dic)
+                # output_s = model.forward(model.support_x, model.weights, reuse=True)
+                # output_q = model.forward(model.query_x, model.weights, reuse=True)
+
+                # comloss = sess.run(utils.compute_loss((output_q, model.query_y), output_s, model.support_y), feed_dic)
+
+            if(i == 0 and j == 0 and FLAGS.visualize):
+                visualize(sess, graph=True)
+            if FLAGS.lr_decay and j%10==0: model.decay()
+            l += la[0]
+            a += la[1]
+
+        print("\n epoch %d loss is %f, acc is %f"%(i,l/FLAGS.episode_tr, a/FLAGS.episode_tr))
+        # print(la[2])
         if (i > 100 and (i % 100 == 0 or a/FLAGS.episode >= bestacc)):
             saver.save(sess, FLAGS.model_path, global_step=i)
 

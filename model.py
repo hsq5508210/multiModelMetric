@@ -9,13 +9,13 @@ FLAGS = flags.FLAGS
 
 
 class Model:
-    def __init__(self, sess, output_dim=10):
+    def __init__(self, output_dim=10):
         self.input_dim = FLAGS.input_dim
         self.output_dim = output_dim
         self.dim_hidden = FLAGS.filter_num
         self.neighbor_k = FLAGS.k_neighbor
         self.lr = FLAGS.lr
-        self.sess = sess
+        # self.sess = sess
         if FLAGS.data_source == 'PACS':
             self.channels = 3
         if FLAGS.backbone == 'Conv':
@@ -26,7 +26,7 @@ class Model:
             self.forward = self.forward_res
     def decay(self):
         global_step = FLAGS.episode_tr * FLAGS.iteration
-        decay_steps = FLAGS.iteration
+        decay_steps = FLAGS.iteration/100
         decay_rate = FLAGS.decay_rate
         self.lr = tf.train.exponential_decay(self.lr, global_step=global_step, decay_steps=decay_steps,
                                               decay_rate=decay_rate)
@@ -37,7 +37,8 @@ class Model:
             output_q = self.forward(self.query_x, weights, reuse=resuse)
             predict = self.category_choose(output_q, output_s,  support_y)
             accurcy = get_acc(predict, query_y)
-            task_losses = tf.map_fn(fn=lambda qxy:compute_loss(qxy, output_s, support_y), elems=(output_s,query_y))
+            task_losses = tf.map_fn(fn=lambda qxy:compute_loss(qxy, output_s, support_y, 0.4),
+                                    elems=(output_q,query_y), dtype=tf.float32, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
 
         return task_losses, accurcy
 
@@ -68,7 +69,7 @@ class Model:
                 self.loss = loss = tf.reduce_sum(losses) / tf.to_float(FLAGS.query_num * FLAGS.model * FLAGS.way_num)
             with tf.name_scope("compute_grad"):
                 optimizer = tf.train.AdamOptimizer(self.lr)
-                self.gvs = gvs = optimizer.compute_gradients(loss+0.00001)
+                self.gvs = gvs = optimizer.compute_gradients(loss)
                 with tf.name_scope("clip_grad"):
                     if FLAGS.data_source == 'PACS':
                         gvs = [(tf.clip_by_value(grad, -5, 5), var) for grad, var in gvs]
@@ -86,7 +87,7 @@ class Model:
             output_s = self.vectorlize(output_s)
             output_q = self.vectorlize(output_q)
             with tf.name_scope('category'):
-                softmax = tf.map_fn(fn=lambda q:get_dist_category(q, output_s, label_s), elems=output_q)
+                softmax = tf.map_fn(fn=lambda q: get_dist_category(q, output_s, label_s), elems=output_q, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
         return softmax
 
 
@@ -117,10 +118,10 @@ class Model:
     def forward_conv(self, inp, weights, reuse=True):
         scope = ''
         with tf.name_scope("forward_conv"):
-            hidden1 = conv_block(inp, weights['conv1'], weights['b1'], reuse)
-            hidden2 = conv_block(hidden1, weights['conv2'], weights['b2'], reuse)
-            hidden3 = conv_block(hidden2, weights['conv3'], weights['b3'], reuse)
-            hidden4 = conv_block(hidden3, weights['conv4'], weights['b4'], reuse)
+            hidden1 = conv_block(inp, weights['conv1'], weights['b1'], scope+'1', reuse)
+            hidden2 = conv_block(hidden1, weights['conv2'], weights['b2'], scope+'2',reuse)
+            hidden3 = conv_block(hidden2, weights['conv3'], weights['b3'], scope+'3',reuse)
+            hidden4 = conv_block(hidden3, weights['conv4'], weights['b4'], scope+'4',reuse)
         return hidden4
 
 

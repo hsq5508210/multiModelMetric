@@ -5,7 +5,7 @@ import tensorflow as tf
 import numpy as np
 import cv2
 import os
-
+import math
 FLAGS = flags.FLAGS
 np.random.seed(0)
 
@@ -180,7 +180,7 @@ def make_set_tensor(dict_set):
 
 
 ## Network helpers
-def conv_block(inp, cweight, bweight, reuse, activation=tf.nn.leaky_relu, max_pool_pad='VALID', residual=False):
+def conv_block(inp, cweight, bweight, scope, reuse, activation=tf.nn.leaky_relu, max_pool_pad='VALID', residual=False):
     """ Perform, conv, batch norm, nonlinearity, and max pool """
     stride, no_stride = [1,2,2,1], [1,1,1,1]
     with tf.name_scope("conv"):
@@ -188,17 +188,17 @@ def conv_block(inp, cweight, bweight, reuse, activation=tf.nn.leaky_relu, max_po
             conv_output = tf.nn.conv2d(inp, cweight, no_stride, 'SAME') + bweight
         else:
             conv_output = tf.nn.conv2d(inp, cweight, stride, 'SAME') + bweight
-        normed = normalize(conv_output, activation, reuse)
+        normed = normalize(conv_output, activation, scope, reuse)
         if FLAGS.max_pool:
             normed = tf.nn.max_pool(normed, stride, stride, max_pool_pad)
     return normed
 
-def normalize(inp, activation, reuse):
+def normalize(inp, activation, scope, reuse):
     with tf.name_scope("normalize"):
         if FLAGS.norm == 'batch_norm':
-            return tf_layers.batch_norm(inp, activation_fn=activation, reuse=reuse)
+            return tf_layers.batch_norm(inp, activation_fn=activation, reuse=reuse, scope=scope)
         elif FLAGS.norm == 'layer_norm':
-            return tf_layers.layer_norm(inp, activation_fn=activation, reuse=reuse)
+            return tf_layers.layer_norm(inp, activation_fn=activation, reuse=reuse, scope=scope)
         elif FLAGS.norm == 'None':
             if activation is not None:
                 return activation(inp)
@@ -217,44 +217,40 @@ def distance(x, y):
             distance = inner_product(x, y)/tf.sqrt(inner_product(x,x) * inner_product(y,y))
         elif FLAGS.distance_style == 'inner_product':
             distance = inner_product(x, y)
-        d = tf.map_fn(fn=lambda s:tf.fill(value=s, dims=(FLAGS.way_num, )), elems=distance)
+        d = tf.map_fn(fn=lambda s:tf.fill(value=s, dims=(FLAGS.way_num, )), elems=distance, parallel_iterations=FLAGS.support_num*FLAGS.way_num*FLAGS.model)
     return d
-def intra_dist(dist, query_y, support_y):
+def intra_dist(dist, weights, query_y, support_y):
     """1(query) v. n(support) compare."""
     with tf.name_scope("intra_dist"):
         with tf.name_scope("same_matrix"):
             qy = tf.cast(query_y, dtype=tf.bool)
             sy = tf.cast(support_y, dtype=tf.bool)
             same_matrix = tf.cast(tf.logical_and(qy, sy), dtype=tf.float32)
-        res = tf.reduce_sum(dist*same_matrix)
+            sm = tf.matmul(weights, same_matrix)
+        res = tf.reduce_sum(dist*sm)
     return res
 def get_differ_matrix(qy, sy):
     return tf.cond(pred=tf.reduce_all(tf.equal(qy,sy)), true_fn=lambda:tf.zeros_like(qy), false_fn=lambda:sy)
 
-def inter_dist(dist, query_y, support_y):
+def inter_dist(dist, weights, query_y, support_y, t):
     """1(query) v. n(support) compare."""
     with tf.name_scope("inter_dist"):
         with tf.name_scope("differ_matrix"):
-            differ_matrix = tf.map_fn(fn=lambda sy:get_differ_matrix(query_y, sy), elems=support_y)
-        res = tf.reduce_sum(dist*differ_matrix)
-    return res
-def compute_loss(qxy, support_x, support_y):
-    """comput distance based loss.
-       qxy is a tuple:(query_x, query_y)
-    """
-    query_x, query_y = qxy
-    dist = distance(query_x, support_x)
-    intrad = intra_dist(dist, query_y, support_y)
-    interd = inter_dist(dist, query_y, support_y)
-    return intrad - interd
+            differ_matrix = tf.map_fn(fn=lambda sy:get_differ_matrix(query_y, sy), elems=support_y, parallel_iterations=FLAGS.support_num*FLAGS.way_num*FLAGS.model)
+            dm = tf.matmul(weights, differ_matrix)
+        res = dist*dm
+        T = (-t)*dm
+    return res+T
+
 
 def get_acc(pred, actual):
     with tf.name_scope("compute_accu"):
         p = tf.cast(tf.one_hot(tf.arg_max(pred, 1), FLAGS.way_num), dtype=tf.bool)
         a = tf.cast(actual, dtype=tf.bool)
-    return tf.reduce_sum(tf.cast(tf.logical_and(p, a),
+        acc = tf.reduce_sum(tf.cast(tf.logical_and(p, a),
                                  dtype=tf.float32))/\
-           tf.cast(FLAGS.support_num*FLAGS.model*FLAGS.way_num, dtype=tf.float32)
+           tf.cast(FLAGS.query_num*FLAGS.model*FLAGS.way_num, dtype=tf.float32)
+    return acc
 
 
 def get_dist_category(x, y, y_onehot_label):
@@ -264,6 +260,31 @@ def get_dist_category(x, y, y_onehot_label):
         sum = tf.reduce_sum(res)
     return res/sum
 
+def category_sifter(label):
+    with tf.name_scope("category_sifter"):
+        sifter = tf.transpose(label)
+    return sifter
+def sift_set(sx, sy):
+    with tf.name_scope("mean_sifter_x"):
+        sifter_y = category_sifter(sy)
+        num_diag = tf.matrix_diag(1/tf.reduce_sum(sifter_y, axis=1))
+        sifter_x = tf.matmul(sifter_y, sx)
+        mean_x = tf.matmul(num_diag, sifter_x)
+    return mean_x
+def get_weights_diag_matrix(sx, sy):
+    """get the weights for each sample, based on distance."""
+    with tf.name_scope("get_sample_weights_matrix"):
+        meanx = tf.matmul(sy, sift_set(sx, sy))
+        dist = tf.reshape(tf.exp(-tf.reduce_sum(tf.square(sx - meanx), axis=1)), (1, -1))
+        sums = 1/tf.matmul(dist, sy)
+        distance_matrix = tf.matrix_diag(tf.matmul(sums, tf.transpose(sy)))
+        weights = tf.matrix_diag(tf.matmul(dist, distance_matrix))
+    return weights
+def vectorlize(x):
+    with tf.name_scope('vectorlize'):
+        size = math.floor(FLAGS.image_size/(2**4))
+        x = tf.reshape(tensor=x, shape=[-1, size*size*FLAGS.filter_num])
+    return x
 ## Loss functions
 def mse(pred, label):
     return tf.reduce_mean(tf.square(pred-label), axis=1)
@@ -271,3 +292,20 @@ def mse(pred, label):
 def xent(pred, label):
     # Note - with tf version <=0.12, this loss has incorrect 2nd derivatives
     return tf.nn.softmax_cross_entropy_with_logits(logits=pred, labels=label) / FLAGS.update_batch_size
+
+def compute_loss(qxy, support_x, support_y, t=1.0):
+    """comput distance based loss.
+       qxy is a tuple:(query_x, query_y).
+       q(1) v. s(n).
+    """
+    with tf.name_scope("distance_loss"):
+        query_x, query_y = qxy
+        support_x = vectorlize(support_x)
+        query_x = vectorlize(query_x)
+        weights = get_weights_diag_matrix(support_x, support_y)
+        dist = distance(query_x, support_x)
+        intrad = intra_dist(dist, weights, query_y, support_y)
+        interd = inter_dist(dist, weights, query_y, support_y, t)
+        log_likely_hood = -tf.log(tf.exp(-intrad)/(tf.exp(-intrad) + tf.reduce_sum(tf.exp(-interd))))
+    return log_likely_hood
+    # return interd
