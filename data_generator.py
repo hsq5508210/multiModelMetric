@@ -11,7 +11,7 @@ from utils import make_set_tensor
 FLAGS = flags.FLAGS
 
 class DataGenerator(object):
-    def __init__(self, query_num_per_class_per_model, support_num_per_class_per_model):
+    def __init__(self, query_num_per_class_per_model, support_num_per_class_per_model, train):
         self.query_num_per_class_per_model = query_num_per_class_per_model
         self.support_num_per_class_per_model = support_num_per_class_per_model
 
@@ -20,12 +20,13 @@ class DataGenerator(object):
             self.img_size = FLAGS.image_size
             self.input_dim = np.prod(self.img_size)*3
             self.output_dim = self.num_class
+            self.train = train
             raw_data_dir = FLAGS.data_PATH
-            if FLAGS.train:
+            if self.train:
                 self.episode = FLAGS.episode_tr
             else:
                 self.episode = FLAGS.episode_ts
-    def make_data_tensor(self, train=True):
+    def make_data_tensor(self, ):
         """
         :param train: train or not.
         :return: all tasks, composed by dicts e.g.{'support_set': support_set, 'query_set':query_set}
@@ -35,7 +36,7 @@ class DataGenerator(object):
         print('Generating tensor datas...')
         all_tasks = []
         for _ in tqdm(range(self.episode)):
-            task = sample_task(query_num_per_class_per_model=FLAGS.query_num, class_num=FLAGS.way_num, support_num_per_class_per_model=FLAGS.support_num)
+            task = sample_task(query_num_per_class_per_model=FLAGS.query_num, class_num=FLAGS.way_num, support_num_per_class_per_model=FLAGS.support_num, train=self.train)
             #support_set[0] is images, support_set[1] is labels
             support_set, query_set = make_set_tensor(task['support']), make_set_tensor(task['query'])
             all_tasks.append({'support_set': support_set, 'query_set':query_set})

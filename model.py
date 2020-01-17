@@ -3,7 +3,7 @@
 import tensorflow as tf
 import math
 from tensorflow.python.platform import flags
-from utils import conv_block, distance, mse, compute_loss, get_dist_category, get_acc, intra_dist, inter_dist
+from utils import conv_block, distance, mse, compute_loss, get_dist_category, get_acc, intra_dist, inter_dist,category_choose, pred_loss
 FLAGS = flags.FLAGS
 
 
@@ -24,6 +24,8 @@ class Model:
         else:
             self.construct_weights = self.construct_res
             self.forward = self.forward_res
+        if FLAGS.loss_function == 'mse':
+            self.loss_function = pred_loss
     def decay(self):
         global_step = FLAGS.episode_tr * FLAGS.iteration
         decay_steps = FLAGS.iteration/100
@@ -35,10 +37,13 @@ class Model:
             support_x, support_y, query_x, query_y = inp
             output_s = self.forward(self.support_x, weights, reuse=resuse)
             output_q = self.forward(self.query_x, weights, reuse=resuse)
-            predict = self.category_choose(output_q, output_s,  support_y)
+            predict = category_choose(output_q, output_s,  support_y)
             accurcy = get_acc(predict, query_y)
-            task_losses = tf.map_fn(fn=lambda qxy:compute_loss(qxy, output_s, support_y, 0.4),
-                                    elems=(output_q,query_y), dtype=tf.float32, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
+            # task_losses = tf.map_fn(fn=lambda qxy:compute_loss(qxy, output_s, support_y, 0.4),
+            #                         elems=(output_q,query_y), dtype=tf.float32, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
+            task_losses = tf.map_fn(fn=lambda qxy: self.loss_function(qxy, output_s, support_y, 0.4),
+                                    elems=(output_q, query_y), dtype=tf.float32,
+                                    parallel_iterations=FLAGS.model * FLAGS.way_num * FLAGS.query_num)
 
         return task_losses, accurcy
 
@@ -81,14 +86,6 @@ class Model:
 
 
 
-    def category_choose(self, output_q, output_s, label_s):
-        with tf.name_scope('category_choose'):
-
-            output_s = self.vectorlize(output_s)
-            output_q = self.vectorlize(output_q)
-            with tf.name_scope('category'):
-                softmax = tf.map_fn(fn=lambda q: get_dist_category(q, output_s, label_s), elems=output_q, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
-        return softmax
 
 
 
@@ -101,7 +98,7 @@ class Model:
     def construct_conv(self):
         weights = {}
         dtype = tf.float32
-        conv_initializer =  tf.contrib.layers.xavier_initializer_conv2d(dtype=dtype,seed=0)
+        conv_initializer = tf.contrib.layers.xavier_initializer(uniform=False,dtype=dtype, seed=0)
         k = 3
         with tf.name_scope('weights'):
             weights['conv1'] = tf.get_variable('conv1', [k, k, self.channels, self.dim_hidden], initializer=conv_initializer, dtype=dtype)

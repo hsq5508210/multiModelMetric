@@ -44,7 +44,7 @@ def get_split(train, test):
     """
     data = {'train':{}, 'text':{}}
     data['train'] = readtxt(train)
-    data['text'] = readtxt(test)
+    data['test'] = readtxt(test)
 
     return data
 
@@ -60,20 +60,19 @@ def groupByLabel(data, class_num):
         group[int(item['label'])-1].append(item['path'])
     return group
 
-def split(model, split_PATH, image_PATH = "/data2/hsq/Project/PACS"):
+def split(model, split_PATH, train,image_PATH = "/data2/hsq/Project/PACS"):
     """
     :param PATH: root dir of split .txt file.
     :return: file name of data group by label each model e.g. {'art_painting':list[] .....}
     """
-    train_or_test = 'train'
-    # if not FLAGS.train:
-    #     train_or_test = 'test'
-    # splits_PATH = PATH
+    if train:
+        train_or_test = 'train'
+    else:
+        train_or_test = 'test'
     splits = os.listdir(split_PATH)
     trainsplits = [os.path.join(split_PATH, s) for s in splits if train_or_test in s]
-    dic_model_file = {m:s for m in model for s in trainsplits if m in s}
-    data_model = {m:groupByLabel(readtxt(dic_model_file[m],image_PATH), 7) for m in model}
-    # print(data_model)
+    dic_model_file = {m: s for m in model for s in trainsplits if m in s}
+    data_model = {m: groupByLabel(readtxt(dic_model_file[m], image_PATH), 7) for m in model}
     return data_model
 
 def sample_support(support_num=5):
@@ -81,7 +80,7 @@ def sample_support(support_num=5):
 
 # def sample_task(data_model=split(), query_num_per_class_per_model=1, class_num=5, support_num_per_class_per_model=1):
 def sample_task(query_num_per_class_per_model=1, class_num=5,
-                    support_num_per_class_per_model=1):
+                    support_num_per_class_per_model=1, train=True):
     """
     :param data_model: list of module name e.g. ['art_painting', 'cartoon', 'photo', 'sketch']
     :param class_num: n-ways.
@@ -91,16 +90,14 @@ def sample_task(query_num_per_class_per_model=1, class_num=5,
     """
     if FLAGS.data_source == 'PACS':
         raw_path, split_txt, model, train_test = config()
-        data_model = split(model, split_txt, raw_path)
+        data_model = split(model, split_txt, train, raw_path)
     classes = []
     task_data = []
-    # task_label = []
     while True:
         n = np.random.randint(0, 6)
         if n not in classes:
             classes.append(n)
         if len(classes) == class_num: break
-    # print(classes)
     s = {'data':[], 'label':[]}
     q = {'data':[], 'label':[]}
     for m in model:
@@ -128,8 +125,6 @@ def sample_task(query_num_per_class_per_model=1, class_num=5,
             s['label'].extend(support_y)
             q['data'].extend(query_x)
             q['label'].extend(query_y)
-            # task = {'support_xy':[support_x, support_y], 'query_xy':[query_x, query_y] }
-            # task_data.append(task)
     return {'support':s, 'query':q}
 
 # def make_set_tensor(dict_set):
@@ -285,6 +280,14 @@ def vectorlize(x):
         size = math.floor(FLAGS.image_size/(2**4))
         x = tf.reshape(tensor=x, shape=[-1, size*size*FLAGS.filter_num])
     return x
+def category_choose(output_q, output_s, label_s):
+    with tf.name_scope('category_choose'):
+
+        output_s = vectorlize(output_s)
+        output_q = vectorlize(output_q)
+        with tf.name_scope('category'):
+            softmax = tf.map_fn(fn=lambda q: get_dist_category(q, output_s, label_s), elems=output_q, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num, dtype=tf.float32)
+    return softmax
 ## Loss functions
 def mse(pred, label):
     return tf.reduce_mean(tf.square(pred-label), axis=1)
@@ -292,6 +295,13 @@ def mse(pred, label):
 def xent(pred, label):
     # Note - with tf version <=0.12, this loss has incorrect 2nd derivatives
     return tf.nn.softmax_cross_entropy_with_logits(logits=pred, labels=label) / FLAGS.update_batch_size
+def pred_loss(qxy, support_x, support_y, t):
+    with tf.name_scope('pred_loss'):
+        query_x, query_y = qxy
+        pred = category_choose(query_x, support_x, support_y)
+        loss = mse(pred, query_y)
+    return loss
+
 
 def compute_loss(qxy, support_x, support_y, t=1.0):
     """comput distance based loss.
