@@ -16,8 +16,8 @@ class Model:
         self.neighbor_k = FLAGS.k_neighbor
         self.lr = FLAGS.lr
         # self.sess = sess
-        if FLAGS.data_source == 'PACS':
-            self.channels = 3
+        # if FLAGS.data_source == 'PACS':
+        self.channels = 3
         if FLAGS.backbone == 'Conv':
             self.construct_weights = self.construct_conv
             self.forward = self.forward_conv
@@ -32,11 +32,12 @@ class Model:
         decay_rate = FLAGS.decay_rate
         self.lr = tf.train.exponential_decay(self.lr, global_step=global_step, decay_steps=decay_steps,
                                               decay_rate=decay_rate)
-    def get_loss(self, inp, weights, resuse=True):
+    def get_loss(self, inp, resuse=True):
         with tf.name_scope("compute_loss"):
+            weights = self.weights
             support_x, support_y, query_x, query_y = inp
-            output_s = self.forward(self.support_x, weights, reuse=resuse)
-            output_q = self.forward(self.query_x, weights, reuse=resuse)
+            output_s = self.forward(support_x, weights, reuse=resuse)
+            output_q = self.forward(query_x, weights, reuse=resuse)
             predict = category_choose(output_q, output_s,  support_y)
             accurcy = get_acc(predict, query_y)
             # task_losses = tf.map_fn(fn=lambda qxy:compute_loss(qxy, output_s, support_y, 0.4),
@@ -44,8 +45,28 @@ class Model:
             task_losses = tf.map_fn(fn=lambda qxy: self.loss_function(qxy, output_s, support_y, 0.4),
                                     elems=(output_q, query_y), dtype=tf.float32,
                                     parallel_iterations=FLAGS.model * FLAGS.way_num * FLAGS.query_num)
-
         return task_losses, accurcy
+    def predict_category(self, resuse=True):
+        weights = self.weights
+        support_x, support_y, query_x, query_y = self.support_x, self.support_y, self.query_x, self.query_y
+        output_s = self.forward(support_x, weights, reuse=resuse)
+        output_q = self.forward(query_x, weights, reuse=resuse)
+        predict = category_choose(output_q, output_s, support_y)
+
+        return predict
+    def test_acc(self, inp, resuse=True):
+        with tf.name_scope("test_acc"):
+            weights = self.weights
+            support_x, support_y, query_x, query_y = inp
+            # output_s = self.forward(self.support_x, weights, reuse=resuse)
+            # output_q = self.forward(self.query_x, weights, reuse=resuse)
+            output_s = self.forward(support_x, weights, reuse=resuse)
+            output_q = self.forward(query_x, weights, reuse=resuse)
+            predict = category_choose(output_q, output_s,  support_y)
+            accurcy = get_acc(predict, query_y)
+
+
+        return accurcy
 
 
     def construct_model(self, input_tensor=None):
@@ -66,9 +87,24 @@ class Model:
             self.weights = weights = self.construct_weights()
         accurcy = []
         losses = []
+    def testop(self, batchinp):
+        # batch_support_x, batch_support_y, batch_query_x, batch_query_y = batchinp
+        batchinp = self.support_x, self.support_y, self.query_x, self.query_y
+        # batch_support_x = tf.cast(tf.convert_to_tensor(batchinp[0]), dtype=tf.float32)
+        # batch_support_y = tf.cast(tf.convert_to_tensor(batchinp[1]), dtype=tf.float32)
+        # batch_query_x = tf.cast(tf.convert_to_tensor(batchinp[2]), dtype=tf.float32)
+        # batch_query_y = tf.cast(tf.convert_to_tensor(batchinp[3]), dtype=tf.float32)
+        # loss, acc = tf.map_fn(fn=self.get_loss, elems=(batch_support_x, batch_support_y, batch_query_x, batch_query_y), dtype=tf.float32, parallel_iterations=30)
+        acc = tf.map_fn(fn=self.test_acc, elems=(batchinp), dtype=tf.float32, parallel_iterations=FLAGS.test_batch_size)
+
+        # return tf.reduce_sum(acc)
+
+        return acc
+
+
 
     def trainop(self):
-        losses, acc = self.get_loss((self.support_x, self.support_y, self.query_x, self.query_y), self.weights)
+        losses, acc = self.get_loss((self.support_x, self.support_y, self.query_x, self.query_y))
         if FLAGS.train:
             with tf.name_scope("loss"):
                 self.loss = loss = tf.reduce_sum(losses) / tf.to_float(FLAGS.query_num * FLAGS.model * FLAGS.way_num)
@@ -76,8 +112,8 @@ class Model:
                 optimizer = tf.train.AdamOptimizer(self.lr)
                 self.gvs = gvs = optimizer.compute_gradients(loss)
                 with tf.name_scope("clip_grad"):
-                    if FLAGS.data_source == 'PACS':
-                        gvs = [(tf.clip_by_value(grad, -5, 5), var) for grad, var in gvs]
+                    # if FLAGS.data_source == 'PACS':
+                    gvs = [(tf.clip_by_value(grad, -5, 5), var) for grad, var in gvs]
                 self.train = optimizer.apply_gradients(gvs)
             self.acc = acc
         return self.train, [self.loss, acc]

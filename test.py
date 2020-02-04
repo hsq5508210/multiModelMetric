@@ -59,22 +59,70 @@ def get_weights_diag_matrix(sx, sy):
 
 # dist = distance(qx, sx)
 
-with tf.Session() as sess:
-    print(tf.transpose(sy).eval())
-    print(sy.eval())
+# with tf.Session() as sess:
+#     print(tf.transpose(sy).eval())
+#     print(sy.eval())
+#
+#     # print(category)
+#     # category = tf.one_hot(category, depth=3, axis=0)
+#     # print(category.eval())
+#     print(sx.eval())
+#     # print(tf.matrix_diag(1/tf.reduce_sum(sy, axis=0)).eval())
+#     # print(sift_set(sx, sy).eval())
+#     # print(tf.matmul(getweights(sx, sy),sx).eval())
+#     inp = (qx, qy)
+#     l = tf.convert_to_tensor([0,1], dtype=tf.int8)
+#     # qx = tf.reshape(qx, (2,1,-1))
+#     # qy = tf.reshape(qy, (2, 1, -1))
+#     print(qx.shape, qy.shape)
+#
+#     loss = tf.map_fn(fn=lambda qxy: compute_loss((qxy[0], qxy[1]), sx, sy, 1), elems=(qx, qy), dtype=tf.float32, parallel_iterations=2)
+#     print(loss.eval())
+import os
+def config(data_source):
+    configs = {}
+    if data_source == 'PACS':
+        configs['PATH'] = FLAGS.data_PATH
+        configs['split_txt_PATH'] = FLAGS.split_txt_PATH
+        configs['model'] = ['art_painting', 'cartoon', 'photo', 'sketch']
+        configs['split'] = ['train', 'test']
+    elif data_source == 'mini-imagenet':
+        configs['PATH'] = "/data2/hsq/mini-Imagenet"
+        configs['split_txt_PATH'] = "/data2/hsq/mini-imagenet-split"
+        configs['model'] = ['photo', 'sketch']
+        configs['split'] = ['train', 'test', 'val']
+    return configs.values()
+def readcsv(filename, image_PATH):
+    nameList = []
+    csv = open(filename, 'r')
+    for line in csv:
+        item = {'path': "", 'label': 0}
+        # print(line)
+        line = line.strip('\n')
+        item['path'], item['label'] = line.split(',')
+        item['path'] = os.path.join(image_PATH, item['path'])
+        nameList.append(item)
+    csv.close()
+    return nameList[1:]
+def sample_imagenet(query_num_per_class_per_model=1, class_num=5,
+                    support_num_per_class_per_model=1, train=True):
 
-    # print(category)
-    # category = tf.one_hot(category, depth=3, axis=0)
-    # print(category.eval())
-    print(sx.eval())
-    # print(tf.matrix_diag(1/tf.reduce_sum(sy, axis=0)).eval())
-    # print(sift_set(sx, sy).eval())
-    # print(tf.matmul(getweights(sx, sy),sx).eval())
-    inp = (qx, qy)
-    l = tf.convert_to_tensor([0,1], dtype=tf.int8)
-    # qx = tf.reshape(qx, (2,1,-1))
-    # qy = tf.reshape(qy, (2, 1, -1))
-    print(qx.shape, qy.shape)
-
-    loss = tf.map_fn(fn=lambda qxy: compute_loss((qxy[0], qxy[1]), sx, sy, 1), elems=(qx, qy), dtype=tf.float32, parallel_iterations=2)
-    print(loss.eval())
+    raw_path, split_txt, model, train_test = config('mini-imagenet')
+    if train:
+        train_or_test = 'train'
+    else:
+        train_or_test = 'test'
+    split_csv_path = [os.path.join(split_txt, t) for t in os.listdir(split_txt) if train_or_test in t][0]
+    fliename_label = [readcsv(split_csv_path, os.path.join(raw_path, m)) for m in model]
+    labels0 = set([fl['label'] for fl in fliename_label[1]])
+    class_num = len(labels0)
+    total_group = {m:[] for m in model}
+    for k, m in enumerate(model):
+        group = [[] for i in range(class_num)]
+        for i, c in enumerate(labels0):
+            group[i] = [fl['path'] for fl in fliename_label[k] if c == fl['label']]
+        total_group[m] = group
+    return total_group
+a = sample_imagenet()
+print(a['photo'][0][0])
+print(a['sketch'][0][0])

@@ -9,12 +9,20 @@ import utils
 from tqdm import tqdm
 FLAGS = flags.FLAGS
 ##config dataset
-flags.DEFINE_string("data_PATH", default="/home/nnu/hsq/PACS/", help="The dataset's path.")
-flags.DEFINE_string("split_txt_PATH", default="/home/nnu/hsq/metric_PACS/pacs_filename", help="file with how to split row data.")
-flags.DEFINE_string("data_source", default="PACS", help="The dataset's name.")
+# flags.DEFINE_string("data_PATH", default="/data2/hsq/Project/PACS/", help="The dataset's path.")
+# flags.DEFINE_string("split_txt_PATH", default="/data2/hsq/Project/multiModelMetric/pacs_filename", help="file with how to split row data.")
+
+flags.DEFINE_string("data_PATH", default="/data2/hsq/mini-Imagenet", help="The dataset's path.")
+flags.DEFINE_string("split_txt_PATH", default="/data2/hsq/mini-imagenet-split", help="file with how to split row data.")
+flags.DEFINE_string("meta_data_path", default="/data2/hsq/Project/mini-imagenet-tasks-data", help="npy file path.")
+# flags.DEFINE_string("data_source", default="PACS", help="The dataset's name.")
+
+flags.DEFINE_string("data_source", default="mini-imagenet", help="The dataset's name.")
+
+
 flags.DEFINE_integer("image_size", default=64, help="input image channels.")
-flags.DEFINE_integer("model", default=4, help="The num of data model.")
-flags.DEFINE_integer("num_class", default=7, help="The num of category.")
+flags.DEFINE_integer("model", default=2, help="The num of data model.")
+# flags.DEFINE_integer("num_class", default=7, help="The num of category.")
 
 ##config model
 flags.DEFINE_integer("k_neighbor", default=1, help="the number of k-nearest neighbors.")
@@ -29,9 +37,11 @@ flags.DEFINE_bool("max_pool", default=True, help="use maxpool or not")
 
 
 ##config train
-flags.DEFINE_integer("episode_tr", default=2000, help="the total number of training episodes.")
-flags.DEFINE_integer("episode_val", default=1000, help="the total number of evaluate episodes.")
-flags.DEFINE_integer("episode_ts", default=100, help="the total number of testing episodes.")
+flags.DEFINE_integer("episode_tr", default=10000, help="the total number of training episodes.")
+flags.DEFINE_integer("episode_val", default=50, help="the total number of evaluate episodes.")
+flags.DEFINE_integer("episode_ts", default=2000, help="the total number of testing episodes.")
+flags.DEFINE_bool("load_ckpt", default=False, help="load check point or not.")
+flags.DEFINE_integer("test_batch_size", default=100, help="the test batch size.")
 flags.DEFINE_integer("support_num", default=1, help="Num of support per class per model.")
 flags.DEFINE_integer("query_num", default=1, help="Num of query per class per model.")
 flags.DEFINE_integer("way_num", default=5, help="the number of classify ways.")
@@ -41,9 +51,11 @@ flags.DEFINE_bool("train", default=True, help="Train or not.")
 flags.DEFINE_bool("lr_decay", default=True, help="lr_decay or not.")
 flags.DEFINE_bool("visualize", default=True, help="visualize or not.")
 flags.DEFINE_float("decay_rate", default=0.999, help="learning rate decay rate.")
-flags.DEFINE_string("model_path", default="log/model_checkpoint/metric_s1_q1_checkpoint", help="model's path.")
+flags.DEFINE_string("model_path", default="/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_10000tasks/5_1_1000tasks", help="model's path.")
 flags.DEFINE_string("loss_function", default="mse", help="choose loss function.")
 FLAGS = flags.FLAGS
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 def visualize(sess, graph=False):
     if graph:
@@ -58,25 +70,56 @@ def make_test_tast(test_tasks):
     return tf.convert_to_tensor(task_support_x, dtype=tf.float32), \
            tf.convert_to_tensor(task_support_y, dtype=tf.float32), tf.convert_to_tensor(task_query_x, dtype=tf.float32), tf.convert_to_tensor(task_query_y, dtype=tf.float32)
 
-def test_iteration(sess, model, task_support_x, task_support_y, task_query_x, task_query_y):
-    num = task_query_y.shape[0]
-    # feed_dic = {model.support_x: task_support_x, model.query_x: task_query_x,
-    #                     model.support_y: task_support_y, model.query_y: task_query_y}
-    losses = tf.map_fn(fn=lambda inp: model.get_loss(inp, model.weights), elems=(task_support_x, task_support_y, task_query_x, task_query_y), dtype=tf.float32)
-    with sess.as_default():
-        loss, acc = sess.run(losses)
-    print("test loss is %f, acc is %f."%(sum(loss)/num, sum(acc)/num))
+def test_iteration(sess, model, bestacc, test_tasks, i, j):
+    saver = tf.train.Saver()
+    if FLAGS.lr_decay: model.decay()
+    test_acc, tl = 0.0, 0.0
+    print("testing...")
+    task_support_x = np.array([task['support_set'][0] for task in test_tasks]).astype(np.float)
+    task_support_y = np.array([task['support_set'][1] for task in test_tasks]).astype(np.float)
+    task_query_x = np.array([task['query_set'][0] for task in test_tasks]).astype(np.float)
+    task_query_y = np.array([task['query_set'][1] for task in test_tasks]).astype(np.float)
+    b = FLAGS.test_batch_size
+    for k in tqdm(range(int(FLAGS.episode_ts / FLAGS.test_batch_size))):
+        support_x = task_support_x[k * b: (k + 1) * b]
+        support_y = task_support_y[k * b: (k + 1) * b]
+        query_x = task_query_x[k * b: (k + 1) * b]
+        query_y = task_query_y[k * b: (k + 1) * b]
+        feed_dic = {model.support_x: support_x, model.query_x: query_x,
+                    model.support_y: support_y, model.query_y: query_y}
+        with sess.as_default():
+            # test_loss, acc = sess.run(model.get_loss((model.support_x, model.support_y, model.query_x, model.query_y), model.weights,), feed_dic)
+            lr, acc = sess.run([model.lr, model.testop((support_x, support_y, query_x, query_y))], feed_dic)
+            print(acc.shape)
+        # acc = model.testop((support_x, support_y, query_x, query_y)).eval()
+        test_acc += sum(acc)
+        # tl += test_loss
+    ts_accurcy = test_acc / FLAGS.episode_ts
+    print("\nepoch %d  test acc is %f." % ((i + 1) * (j + 1), ts_accurcy))
+    print("\nlearning rate is:", lr)
+    if (ts_accurcy > bestacc):
+        bestacc = ts_accurcy
+        saver.save(sess, FLAGS.model_path, global_step=i)
+    return bestacc
+
 
 
 def train(model, data_generator, test_tasks):
     sess = tf.InteractiveSession()
-    saver = tf.train.Saver()
-    # task_support_x, task_support_y, task_query_x, task_query_y = make_test_tast(test_tasks)
-    all_task = data_generator.make_data_tensor()
+    tasks_path = [p for p in os.listdir(FLAGS.meta_data_path) if str(FLAGS.episode_tr) in p]
+    if len(os.listdir(FLAGS.meta_data_path)) == 0 or len(tasks_path) == 0:
+        all_task = data_generator.make_data_tensor()
+        np.save(FLAGS.meta_data_path+'/'+str(FLAGS.episode_tr) +'_tasks.npy', all_task)
+    else:
+        all_task = np.load(os.path.join(FLAGS.meta_data_path, tasks_path[0]), allow_pickle=True)
     trainop, acc_loss = model.trainop()
     tf.global_variables_initializer().run()
     print("training...")
     bestacc = 0.0
+    if FLAGS.load_ckpt:
+        ckpt = tf.train.get_checkpoint_state("/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_10000tasks")
+        print(ckpt.model_checkpoint_path)
+        tf.train.Saver().restore(sess, ckpt.model_checkpoint_path)
     for i in range(FLAGS.iteration):
         l, a = 0, 0
         for j in tqdm(range(FLAGS.episode_tr)):
@@ -89,29 +132,22 @@ def train(model, data_generator, test_tasks):
                 # output_q = model.forward(model.query_x, model.weights, reuse=True)
 
                 # comloss = sess.run(utils.compute_loss((output_q, model.query_y), output_s, model.support_y), feed_dic)
-
             if(i == 0 and j == 0 and FLAGS.visualize):
                 visualize(sess, graph=True)
             l += la[0]
             a += la[1]
-        if i % 10 == 0:
-            if FLAGS.lr_decay: model.decay()
-            test_acc, tl = 0.0, 0.0
-            print("testing...")
-            for j in tqdm(range(FLAGS.episode_ts)):
-                task = test_tasks[j]
-                feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
-                            model.support_y: task['support_set'][1], model.query_y: task['query_set'][1]}
-                with sess.as_default():
-                    test_loss, acc = sess.run(model.get_loss((model.support_x, model.support_y, model.query_x, model.query_y), model.weights,), feed_dic)
-                test_acc += acc
-                tl += sum(test_loss)
-            print("\n epoch %d train loss is %f, train acc is %f." % (i, tl / FLAGS.episode_ts, test_acc / FLAGS.episode_ts))
-        print("\n learning rate is:", model.lr.eval())
-        print("\n epoch %d train loss is %f, train acc is %f."%(i,l/FLAGS.episode_tr, a/FLAGS.episode_tr))
+            if ((j+1)) % 5000 == 0:
+                bestacc = test_iteration(sess, model, bestacc, test_tasks, i, j)
+        if np.isnan(l):
+            task = all_task[0]
+            feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
+                        model.support_y: task['support_set'][1], model.query_y: task['query_set'][1]}
+            with sess.as_default():
+                out_put = sess.run(model.predict_category(), feed_dic)
+            print(out_put)
+        print("\nepoch %d train loss is %f, train acc is %f.\n"%(i+1,l/FLAGS.episode_tr, a/FLAGS.episode_tr))
         # test_iteration(sess, model, task_support_x, task_support_y, task_query_x, task_query_y)
-        if (i > 100 and (i % 100 == 0 or a/FLAGS.episode_tr >= bestacc)):
-            saver.save(sess, FLAGS.model_path, global_step=i)
+
 
 
 
@@ -131,15 +167,19 @@ def test(model, data_generator):
             a += la[1]
     print("\n test loss is %f, acc is %f" % (l / FLAGS.episode, a / FLAGS.episode))
 
-
+import multiprocessing
 def main():
     data_generator = DataGenerator(FLAGS.query_num, FLAGS.support_num, FLAGS.train)
     test_generator = DataGenerator(FLAGS.query_num, FLAGS.support_num, train=False)
     test_tasks = test_generator.make_data_tensor()
+    # print(test_tasks)
     model = Model()
     model.construct_model()
     if FLAGS.train :
-        train(model, data_generator, test_tasks)
+        process = multiprocessing.Process(target=train(model, data_generator, test_tasks))
+        # train(model, data_generator, test_tasks)
+        process.start()
+        process.join()
     else:
         test(model, data_generator)
     exit(0)

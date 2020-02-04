@@ -9,13 +9,18 @@ import math
 FLAGS = flags.FLAGS
 np.random.seed(0)
 
-def config():
+def config(data_source):
     configs = {}
-    if FLAGS.data_source == 'PACS':
+    if data_source == 'PACS':
         configs['PATH'] = FLAGS.data_PATH
         configs['split_txt_PATH'] = FLAGS.split_txt_PATH
         configs['model'] = ['art_painting', 'cartoon', 'photo', 'sketch']
         configs['split'] = ['train', 'test']
+    elif data_source == 'mini-imagenet':
+        configs['PATH'] = FLAGS.data_PATH
+        configs['split_txt_PATH'] = FLAGS.split_txt_PATH
+        configs['model'] = ['photo', 'sketch']
+        configs['split'] = ['train', 'test', 'val']
     return configs.values()
 
 
@@ -34,6 +39,18 @@ def readtxt(filename, image_PATH):
         nameList.append(item)
     txt.close()
     return nameList
+def readcsv(filename, image_PATH):
+    nameList = []
+    csv = open(filename, 'r')
+    for line in csv:
+        item = {'path': "", 'label': 0}
+        # print(line)
+        line = line.strip('\n')
+        item['path'], item['label'] = line.split(',')
+        item['path'] = os.path.join(image_PATH, item['path'])
+        nameList.append(item)
+    csv.close()
+    return nameList[1:]
 
 def get_split(train, test):
     """
@@ -43,8 +60,12 @@ def get_split(train, test):
     :return:data
     """
     data = {'train':{}, 'text':{}}
-    data['train'] = readtxt(train)
-    data['test'] = readtxt(test)
+    if FLAGS.data_source == 'PACS':
+        read_split = readtxt
+    elif FLAGS.data_source == 'mini-imagenet':
+        read_split = readcsv
+    data['train'] = read_split(train)
+    data['test'] = read_split(test)
 
     return data
 
@@ -71,8 +92,13 @@ def split(model, split_PATH, train,image_PATH = "/data2/hsq/Project/PACS"):
         train_or_test = 'test'
     splits = os.listdir(split_PATH)
     trainsplits = [os.path.join(split_PATH, s) for s in splits if train_or_test in s]
-    dic_model_file = {m: s for m in model for s in trainsplits if m in s}
-    data_model = {m: groupByLabel(readtxt(dic_model_file[m], image_PATH), 7) for m in model}
+    if FLAGS.data_source == 'PACS':
+        dic_model_file = {m: s for m in model for s in trainsplits if m in s}
+        data_model = {m: groupByLabel(readtxt(dic_model_file[m], image_PATH), 7) for m in model}
+    # elif FLAGS.data_source == 'mini-imagenet':
+    #     dic_model_file = {m: s for m in model for s in trainsplits if m in s}
+    #     path_label = readcsv(dic_model_file[m], image_PATH)
+    #     data_model = {m: groupByLabel(readcsv(dic_model_file[m], image_PATH), 7) for m in model}
     return data_model
 
 def sample_support(support_num=5):
@@ -89,29 +115,37 @@ def sample_task(query_num_per_class_per_model=1, class_num=5,
 
     """
     if FLAGS.data_source == 'PACS':
-        raw_path, split_txt, model, train_test = config()
+        raw_path, split_txt, model, train_test = config('PACS')
         data_model = split(model, split_txt, train, raw_path)
+        raw_class_num = 7
+    elif FLAGS.data_source == 'mini-imagenet':
+        raw_path, split_txt, model, train_test = config('mini-imagenet')
+        data_model, raw_class_num = split_imagenet(model, split_txt, train, raw_path)
+
     classes = []
     task_data = []
     while True:
-        n = np.random.randint(0, 6)
+        n = np.random.randint(0, raw_class_num-1)
         if n not in classes:
             classes.append(n)
         if len(classes) == class_num: break
-    s = {'data':[], 'label':[]}
-    q = {'data':[], 'label':[]}
-    for m in model:
+    s = {'data':[], 'label':[], 'modal':[]}
+    q = {'data':[], 'label':[], 'modal':[]}
+    for m_label, m in enumerate(model):
         for i, c in enumerate(classes):
             support_x = []
             support_y = []
+            support_modal = []
             query_x = []
             query_y = []
+            query_modal = []
             while True:
                 idx = np.random.randint(len(data_model[m][c]))
                 filename = data_model[m][c][idx]
                 if filename not in support_x:
                     support_x.append(filename)
                     support_y.append(i)
+                    support_modal.append(m_label)
                 if(len(support_x) == support_num_per_class_per_model): break
             while True:
                 idx = np.random.randint(len(data_model[m][c]))
@@ -119,56 +153,56 @@ def sample_task(query_num_per_class_per_model=1, class_num=5,
                 if (filename not in support_x) and (filename not in query_x):
                     query_x.append(filename)
                     query_y.append(i)
+                    query_modal.append(m_label)
                 if(len(query_x) == query_num_per_class_per_model): break
 
             s['data'].extend(support_x)
             s['label'].extend(support_y)
+            s['modal'].extend(support_modal)
             q['data'].extend(query_x)
             q['label'].extend(query_y)
-    return {'support':s, 'query':q}
+            q['modal'].extend(query_modal)
+    return {'support': s, 'query': q}
+def split_imagenet(model, split_txt, train, raw_path):
+    if train:
+        train_or_test = 'train'
+    else:
+        train_or_test = 'test'
+    split_csv_path = [os.path.join(split_txt, t) for t in os.listdir(split_txt) if train_or_test in t][0]
+    fliename_label = [readcsv(split_csv_path, os.path.join(raw_path, m)) for m in model]
+    labels0 = set([fl['label'] for fl in fliename_label[1]])
+    class_num = len(labels0)
+    total_group = {m: [] for m in model}
+    for k, m in enumerate(model):
+        group = [[] for i in range(class_num)]
+        for i, c in enumerate(labels0):
+            group[i] = [fl['path'] for fl in fliename_label[k] if c == fl['label']]
+        total_group[m] = group
+    return total_group, class_num
 
-# def make_set_tensor(dict_set):
-#     """
-#     :param dic_set: data_dict e.g. support_set={'data': [...], 'label':[...]}
-#     :return: image tensors and label-one-hot tensors.
-#     """
-#     file_name_list = dict_set['data']
-#     label_list = dict_set['label']
-#     n_ways = max(label_list)+1
-#     # print(n_ways)
-#     # print(label_list)
-#     labels = tf.convert_to_tensor(label_list)
-#     labels = tf.one_hot(labels, n_ways)
-#     filename_queue = tf.train.string_input_producer(tf.convert_to_tensor(file_name_list, dtype=tf.string), shuffle=False)
-#     image_reader = tf.WholeFileReader()
-#     _, image_file = image_reader.read(filename_queue)
-#     # if FLAGS.data_source = 'PACS':
-#     images = tf.image.decode_jpeg(image_file, channels=3)
-#     images.set_shape((227, 227, 3))
-#     images = tf.cast(images, tf.float32) / 255.0
-#     img_batch = tf.train.batch([images], batch_size=len(file_name_list))
-#     # for _ in file_name_list:
-#     #     b, h, c = images.shape
-#     #     images = tf.reshape(images, [1, b, h, c])
-#     #     img_batch = tf.concat([images, img_batch], 0)
-#     # print(img_batch.shape)
-#     return img_batch, labels
+
+
 
 def make_set_tensor(dict_set):
     """
-    :param dic_set: data_dict e.g. support_set={'data': [...], 'label':[...]}
+    :param dic_set: data_dict e.g. support_set={'data': [...], 'label':[...], 'modal':[...].}
     :return: image tensors and label-one-hot tensors.
     """
     file_name_list = dict_set['data']
     label_list = dict_set['label']
-    n_ways = max(label_list)+1
+    modal_list = dict_set['modal']
+    m_modal = max(modal_list) + 1
+    n_ways = max(label_list) + 1
     labels = np.eye(n_ways)[label_list]
+    modals = np.eye(m_modal)[modal_list]
     img_batch = np.array([cv2.resize(cv2.imread(p),(FLAGS.image_size,FLAGS.image_size)) for p in file_name_list]).astype(np.float)/255.0
     index = np.arange(img_batch.shape[0])
+    #shuffle the sample.
     np.random.shuffle(index)
     tmp_img = np.array([img_batch[i] for i in index])
     tmp_label = np.array([labels[i] for i in index])
-    return tmp_img, tmp_label.astype(np.float)
+    tmp_modal = np.array([labels[i] for i in index])
+    return tmp_img, tmp_label.astype(np.float), tmp_modal.astype(np.float)
 
 
 

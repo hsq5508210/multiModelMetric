@@ -14,18 +14,19 @@ class DataGenerator(object):
     def __init__(self, query_num_per_class_per_model, support_num_per_class_per_model, train):
         self.query_num_per_class_per_model = query_num_per_class_per_model
         self.support_num_per_class_per_model = support_num_per_class_per_model
+        raw_data_dir = FLAGS.data_PATH
+        self.train = train
+        if self.train:
+            self.episode = FLAGS.episode_tr
+        else:
+            self.episode = FLAGS.episode_ts
+        # if FLAGS.data_source == 'PACS':
+        # self.num_class = FLAGS.num_class
+        self.img_size = FLAGS.image_size
+        self.input_dim = np.prod(self.img_size)*3
+        # self.output_dim = self.num_class
 
-        if FLAGS.data_source == 'PACS':
-            self.num_class = FLAGS.num_class
-            self.img_size = FLAGS.image_size
-            self.input_dim = np.prod(self.img_size)*3
-            self.output_dim = self.num_class
-            self.train = train
-            raw_data_dir = FLAGS.data_PATH
-            if self.train:
-                self.episode = FLAGS.episode_tr
-            else:
-                self.episode = FLAGS.episode_ts
+
     def make_data_tensor(self, ):
         """
         :param train: train or not.
