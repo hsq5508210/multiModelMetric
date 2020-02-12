@@ -234,20 +234,29 @@ def normalize(inp, activation, scope, reuse):
             else:
                 return inp
 
-def inner_product(x, y):
-    return tf.reduce_sum(tf.multiply(x, y), axis=1)
+
 
 def distance(x, y):
     """different distance function."""
     with tf.name_scope("compute_distance"):
+        def inner_product(x, y):
+            with tf.name_scope("inner_product"):
+                res = tf.reduce_sum(tf.multiply(x, y), axis=1)
+            return res
+        def cosine(x, y):
+            with tf.name_scope("cosine"):
+                l2_x = tf.diag(tf.sqrt(tf.reduce_sum(tf.square(x), axis=1)))
+                l2_y = tf.diag(tf.sqrt(tf.reduce_sum(tf.square(y), axis=1)))
+                ip = inner_product(x, y)
+            return tf.matmul(tf.matmul(l2_x, ip), l2_y)
         if FLAGS.distance_style == 'euc':
-            distance = tf.sqrt(tf.reduce_sum(tf.square(x-y), axis=1))
+            with tf.name_scope("inner_product"):
+                distance = tf.sqrt(tf.reduce_sum(tf.square(x-y), axis=1))
         elif FLAGS.distance_style == 'cosine':
-            distance = inner_product(x, y)/tf.sqrt(inner_product(x,x) * inner_product(y,y))
+            distance = -cosine(x, y)
         elif FLAGS.distance_style == 'inner_product':
             distance = inner_product(x, y)
-        d = tf.map_fn(fn=lambda s:tf.fill(value=s, dims=(FLAGS.way_num, )), elems=distance, parallel_iterations=FLAGS.support_num*FLAGS.way_num*FLAGS.model)
-    return d
+    return distance
 
 def loss_eps(support_x, query_x, s_modal, q_modal, s_label, q_label, margin):
     with tf.name_scope("loss_eps"):
@@ -319,10 +328,15 @@ def get_acc(pred, actual):
 
 def get_dist_category(x, y, y_onehot_label):
     with tf.name_scope("compute_distance_onehot"):
-        dist = distance(x, y)
-        res = tf.exp(-tf.reduce_sum(dist*y_onehot_label, axis=0))
-        sum = tf.reduce_sum(res)
-    return res/sum
+        if FLAGS.distance_style == 'euc':
+            dist = tf.map_fn(fn=lambda x_: distance(x_, y), elems=x, dtype=tf.float32, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
+        elif FLAGS.distance_style == 'cosine':
+            dist = distance(x, y)
+        # res = tf.exp(-tf.reduce_sum(dist*y_onehot_label, axis=0))
+        res = tf.exp(-tf.matmul(dist, y_onehot_label))
+        sum = tf.diag(1/tf.reduce_sum(res, axis=1))
+        softmax = tf.matmul(sum, res)
+    return softmax
 
 def category_sifter(label):
     with tf.name_scope("category_sifter"):
@@ -355,7 +369,8 @@ def category_choose(output_q, output_s, label_s):
         output_s = vectorlize(output_s)
         output_q = vectorlize(output_q)
         with tf.name_scope('category'):
-            softmax = tf.map_fn(fn=lambda q: get_dist_category(q, output_s, label_s), elems=output_q, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num, dtype=tf.float32)
+            # softmax = tf.map_fn(fn=lambda q: get_dist_category(q, output_s, label_s), elems=output_q, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num, dtype=tf.float32)
+            softmax = get_dist_category(output_q, output_s, label_s)
     return softmax
 ## Loss functions
 def mse(pred, label):

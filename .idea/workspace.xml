@@ -2,11 +2,7 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="deb03a67-c697-429a-8415-5e013bdc8bc8" name="Default Changelist" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/MultiModelity.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/MultiModelity.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/model.py" beforeDir="false" afterPath="$PROJECT_DIR$/model.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -116,7 +112,7 @@
       <workItem from="1580814196901" duration="720000" />
       <workItem from="1580974326550" duration="1756000" />
       <workItem from="1581415850346" duration="980000" />
-      <workItem from="1581491368097" duration="295000" />
+      <workItem from="1581491368097" duration="2561000" />
     </task>
     <servers />
   </component>
