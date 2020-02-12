@@ -3,7 +3,7 @@
 import tensorflow as tf
 import math
 from tensorflow.python.platform import flags
-from utils import conv_block, distance, mse, compute_loss, get_dist_category, get_acc, intra_dist, inter_dist,category_choose, pred_loss
+from utils import conv_block, get_acc, loss_eps, category_choose, category_loss
 FLAGS = flags.FLAGS
 
 
@@ -15,6 +15,7 @@ class Model:
         self.dim_hidden = FLAGS.filter_num
         self.neighbor_k = FLAGS.k_neighbor
         self.lr = FLAGS.lr
+        self.w = FLAGS.loss_weight
         # self.sess = sess
         # if FLAGS.data_source == 'PACS':
         self.channels = 3
@@ -25,7 +26,7 @@ class Model:
             self.construct_weights = self.construct_res
             self.forward = self.forward_res
         if FLAGS.loss_function == 'mse':
-            self.loss_function = pred_loss
+            self.loss_function = category_loss
     def decay(self):
         global_step = FLAGS.episode_tr * FLAGS.iteration
         decay_steps = FLAGS.iteration/100
@@ -35,17 +36,20 @@ class Model:
     def get_loss(self, inp, resuse=True):
         with tf.name_scope("compute_loss"):
             weights = self.weights
-            support_x, support_y, query_x, query_y = inp
+            support_x, support_y, query_x, query_y, support_m, query_m = inp
             output_s = self.forward(support_x, weights, reuse=resuse)
             output_q = self.forward(query_x, weights, reuse=resuse)
             predict = category_choose(output_q, output_s,  support_y)
             accurcy = get_acc(predict, query_y)
             # task_losses = tf.map_fn(fn=lambda qxy:compute_loss(qxy, output_s, support_y, 0.4),
             #                         elems=(output_q,query_y), dtype=tf.float32, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
+            losses_eps = loss_eps(output_s, output_q, support_m, query_m, support_y,
+                                  query_y)
             task_losses = tf.map_fn(fn=lambda qxy: self.loss_function(qxy, output_s, support_y, 0.4),
                                     elems=(output_q, query_y), dtype=tf.float32,
                                     parallel_iterations=FLAGS.model * FLAGS.way_num * FLAGS.query_num)
-        return task_losses, accurcy
+            losses = (1-self.w)*task_losses + self.w * losses_eps
+        return losses, accurcy
     def predict_category(self, resuse=True):
         weights = self.weights
         support_x, support_y, query_x, query_y = self.support_x, self.support_y, self.query_x, self.query_y
@@ -76,11 +80,16 @@ class Model:
                 self.support_y = tf.placeholder(tf.float32, name='support_y')
                 self.query_x = tf.placeholder(tf.float32, name='query_x')
                 self.query_y = tf.placeholder(tf.float32, name='query_y')
+                self.query_m = tf.placeholder(tf.float32, name='query_m')
+                self.support_m = tf.placeholder(tf.float32, name='support_m')
         else:
+            self.support_m = input_tensor['support_set'][2]
             self.support_x = input_tensor['support_set'][0]
             self.support_y = input_tensor['support_set'][1]
+            self.query_m = input_tensor['query_set'][2]
             self.query_x = input_tensor['query_set'][0]
             self.query_y = input_tensor['query_set'][1]
+
         if 'weights' in dir(self):
             weights = self.weights
         else:
@@ -104,7 +113,8 @@ class Model:
 
 
     def trainop(self):
-        losses, acc = self.get_loss((self.support_x, self.support_y, self.query_x, self.query_y))
+        losses, acc = self.get_loss((self.support_x, self.support_y, self.query_x, self.query_y, self.support_m, self.query_m))
+
         if FLAGS.train:
             with tf.name_scope("loss"):
                 self.loss = loss = tf.reduce_sum(losses) / tf.to_float(FLAGS.query_num * FLAGS.model * FLAGS.way_num)

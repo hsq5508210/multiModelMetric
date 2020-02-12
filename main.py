@@ -33,6 +33,9 @@ flags.DEFINE_string("distance_style", default="euc", help="how to compute the di
 flags.DEFINE_bool("maxpool", default=True, help="use maxpool or not.")
 flags.DEFINE_string("norm", default="None", help="choose norm style.")
 flags.DEFINE_bool("max_pool", default=True, help="use maxpool or not")
+flags.DEFINE_float("margin", default=1.0, help="set the margin of the loss_eps.")
+flags.DEFINE_float("loss_weight", default=0.5, help="set the weight of the loss.")
+flags.DEFINE_bool("eps_usehard", default=False, help="eps use hard or not.")
 
 
 
