@@ -39,17 +39,24 @@ class Model:
             support_x, support_y, query_x, query_y, support_m, query_m = inp
             output_s = self.forward(support_x, weights, reuse=resuse)
             output_q = self.forward(query_x, weights, reuse=resuse)
-            predict = category_choose(output_q, output_s,  support_y)
+            self.predict = predict = category_choose(output_q, output_s,  support_y)
             accurcy = get_acc(predict, query_y)
-            # task_losses = tf.map_fn(fn=lambda qxy:compute_loss(qxy, output_s, support_y, 0.4),
-            #                         elems=(output_q,query_y), dtype=tf.float32, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
-            losses_eps = loss_eps(output_s, output_q, support_m, query_m, support_y,
-                                  query_y)
-            task_losses = tf.map_fn(fn=lambda qxy: self.loss_function(qxy, output_s, support_y, 0.4),
-                                    elems=(output_q, query_y), dtype=tf.float32,
-                                    parallel_iterations=FLAGS.model * FLAGS.way_num * FLAGS.query_num)
-            losses = (1-self.w)*task_losses + self.w * losses_eps
-        return losses, accurcy
+            # task_losses = tf.map_fn(fn=lambda qxy: self.loss_function(qxy, output_s, support_y, 0.4),
+            #                         elems=(output_q, query_y), dtype=tf.float32,
+            #                         parallel_iterations=FLAGS.model * FLAGS.way_num * FLAGS.query_num)
+            # task_losses = self.loss_function((output_q, query_y), output_s, support_y)
+            task_losses = self.loss_function(predict, query_y)
+            if FLAGS.eps_loss and FLAGS.category_loss:
+                self.losses_eps = losses_eps = loss_eps(output_s, output_q, support_m, query_m, support_y,
+                                      query_y, FLAGS.margin)
+                losses = (1 - self.w) * task_losses + self.w * losses_eps
+                return losses, accurcy
+            elif FLAGS.category_loss:
+                return task_losses, accurcy
+            elif FLAGS.eps_loss:
+                self.losses_eps = losses_eps = loss_eps(output_s, output_q, support_m, query_m, support_y,
+                                                        query_y, FLAGS.margin)
+                return losses_eps, accurcy
     def predict_category(self, resuse=True):
         weights = self.weights
         support_x, support_y, query_x, query_y = self.support_x, self.support_y, self.query_x, self.query_y

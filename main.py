@@ -30,19 +30,21 @@ flags.DEFINE_integer("input_dim", default=3, help="input image channels.")
 flags.DEFINE_string("backbone", default="Conv", help="Model name.")
 flags.DEFINE_integer("filter_num", default=64, help="Model name.")
 flags.DEFINE_string("distance_style", default="euc", help="how to compute the distance.")
-flags.DEFINE_bool("maxpool", default=True, help="use maxpool or not.")
+flags.DEFINE_bool("max_pool", default=True, help="use maxpool or not.")
 flags.DEFINE_string("norm", default="None", help="choose norm style.")
-flags.DEFINE_bool("max_pool", default=True, help="use maxpool or not")
 flags.DEFINE_float("margin", default=1.0, help="set the margin of the loss_eps.")
 flags.DEFINE_float("loss_weight", default=0.5, help="set the weight of the loss.")
 flags.DEFINE_bool("eps_usehard", default=False, help="eps use hard or not.")
+flags.DEFINE_bool("eps_loss", default=True, help="eps use or not.")
+flags.DEFINE_bool("category_loss", default=True, help="category loss use or not.")
+
 
 
 
 ##config train
-flags.DEFINE_integer("episode_tr", default=10000, help="the total number of training episodes.")
+flags.DEFINE_integer("episode_tr", default=20, help="the total number of training episodes.")
 flags.DEFINE_integer("episode_val", default=50, help="the total number of evaluate episodes.")
-flags.DEFINE_integer("episode_ts", default=2000, help="the total number of testing episodes.")
+flags.DEFINE_integer("episode_ts", default=20, help="the total number of testing episodes.")
 flags.DEFINE_bool("load_ckpt", default=False, help="load check point or not.")
 flags.DEFINE_integer("test_batch_size", default=100, help="the test batch size.")
 flags.DEFINE_integer("support_num", default=1, help="Num of support per class per model.")
@@ -52,9 +54,9 @@ flags.DEFINE_integer("iteration", default=10000, help="iterations.")
 flags.DEFINE_float("lr", default=0.001, help="learning rate.")
 flags.DEFINE_bool("train", default=True, help="Train or not.")
 flags.DEFINE_bool("lr_decay", default=True, help="lr_decay or not.")
-flags.DEFINE_bool("visualize", default=True, help="visualize or not.")
+flags.DEFINE_bool("visualize", default=False, help="visualize or not.")
 flags.DEFINE_float("decay_rate", default=0.999, help="learning rate decay rate.")
-flags.DEFINE_string("model_path", default="/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_10000tasks/5_1_1000tasks", help="model's path.")
+flags.DEFINE_string("model_path", default="/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_lossepshard_w0.3_cosine/5_1_5000_lossepshard_w0.3_cosine", help="model's path.")
 flags.DEFINE_string("loss_function", default="mse", help="choose loss function.")
 FLAGS = flags.FLAGS
 import os
@@ -93,7 +95,6 @@ def test_iteration(sess, model, bestacc, test_tasks, i, j):
         with sess.as_default():
             # test_loss, acc = sess.run(model.get_loss((model.support_x, model.support_y, model.query_x, model.query_y), model.weights,), feed_dic)
             lr, acc = sess.run([model.lr, model.testop((support_x, support_y, query_x, query_y))], feed_dic)
-            print(acc.shape)
         # acc = model.testop((support_x, support_y, query_x, query_y)).eval()
         test_acc += sum(acc)
         # tl += test_loss
@@ -120,7 +121,7 @@ def train(model, data_generator, test_tasks):
     print("training...")
     bestacc = 0.0
     if FLAGS.load_ckpt:
-        ckpt = tf.train.get_checkpoint_state("/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_10000tasks")
+        ckpt = tf.train.get_checkpoint_state("/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000tasks")
         print(ckpt.model_checkpoint_path)
         tf.train.Saver().restore(sess, ckpt.model_checkpoint_path)
     for i in range(FLAGS.iteration):
@@ -128,7 +129,8 @@ def train(model, data_generator, test_tasks):
         for j in tqdm(range(FLAGS.episode_tr)):
             task = all_task[j]
             feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
-                        model.support_y: task['support_set'][1], model.query_y: task['query_set'][1]}
+                        model.support_y: task['support_set'][1], model.query_y: task['query_set'][1],
+                        model.support_m: task['support_set'][2],  model.query_m: task['query_set'][2]}
             with sess.as_default():
                 _, la = sess.run([trainop, acc_loss], feed_dic)
                 # output_s = model.forward(model.support_x, model.weights, reuse=True)
@@ -141,14 +143,16 @@ def train(model, data_generator, test_tasks):
             a += la[1]
             if ((j+1)) % 5000 == 0:
                 bestacc = test_iteration(sess, model, bestacc, test_tasks, i, j)
+        print("\nepoch %d train loss is %f, train acc is %f.\n"%(i+1,l/FLAGS.episode_tr, a/FLAGS.episode_tr))
         if np.isnan(l):
             task = all_task[0]
             feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
                         model.support_y: task['support_set'][1], model.query_y: task['query_set'][1]}
+
             with sess.as_default():
-                out_put = sess.run(model.predict_category(), feed_dic)
+                out_put = sess.run([model.predict_category()], feed_dic)
             print(out_put)
-        print("\nepoch %d train loss is %f, train acc is %f.\n"%(i+1,l/FLAGS.episode_tr, a/FLAGS.episode_tr))
+            break
         # test_iteration(sess, model, task_support_x, task_support_y, task_query_x, task_query_y)
 
 
@@ -179,10 +183,7 @@ def main():
     model = Model()
     model.construct_model()
     if FLAGS.train :
-        process = multiprocessing.Process(target=train(model, data_generator, test_tasks))
-        # train(model, data_generator, test_tasks)
-        process.start()
-        process.join()
+        train(model, data_generator, test_tasks)
     else:
         test(model, data_generator)
     exit(0)

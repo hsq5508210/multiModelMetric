@@ -201,7 +201,7 @@ def make_set_tensor(dict_set):
     np.random.shuffle(index)
     tmp_img = np.array([img_batch[i] for i in index])
     tmp_label = np.array([labels[i] for i in index])
-    tmp_modal = np.array([labels[i] for i in index])
+    tmp_modal = np.array([modals[i] for i in index])
     return tmp_img, tmp_label.astype(np.float), tmp_modal.astype(np.float)
 
 
@@ -241,14 +241,15 @@ def distance(x, y):
     with tf.name_scope("compute_distance"):
         def inner_product(x, y):
             with tf.name_scope("inner_product"):
-                res = tf.reduce_sum(tf.multiply(x, y), axis=1)
+                res = tf.matmul(x, tf.transpose(y))
             return res
         def cosine(x, y):
             with tf.name_scope("cosine"):
                 l2_x = tf.diag(tf.sqrt(tf.reduce_sum(tf.square(x), axis=1)))
                 l2_y = tf.diag(tf.sqrt(tf.reduce_sum(tf.square(y), axis=1)))
                 ip = inner_product(x, y)
-            return tf.matmul(tf.matmul(l2_x, ip), l2_y)
+                res = tf.matmul(tf.matmul(l2_x, ip), l2_y)
+            return res
         if FLAGS.distance_style == 'euc':
             with tf.name_scope("inner_product"):
                 distance = tf.sqrt(tf.reduce_sum(tf.square(x-y), axis=1))
@@ -260,6 +261,8 @@ def distance(x, y):
 
 def loss_eps(support_x, query_x, s_modal, q_modal, s_label, q_label, margin):
     with tf.name_scope("loss_eps"):
+        support_x = vectorlize(support_x)
+        query_x = vectorlize(query_x)
         if FLAGS.distance_style == 'euc':
             querys_to_supports_dist = tf.map_fn(fn=lambda q: distance(q, support_x), elems=query_x, dtype=tf.float32)
         elif FLAGS.distance_style == 'cosine':
@@ -275,7 +278,7 @@ def loss_eps(support_x, query_x, s_modal, q_modal, s_label, q_label, margin):
         if not FLAGS.eps_usehard:
             SLDMS_mean = tf.reduce_sum(same_label_diff_model_sifter, axis=1)
             # print(tf.reduce_sum(same_label_diff_model_sifter * querys_to_supports_dist, axis=1).eval())
-            same_label_diff_model_dist = tf.reduce_sum(same_label_diff_model_sifter * querys_to_supports_dist, axis=1) / SLDMS_mean
+            same_label_diff_model_dist = tf.reduce_sum(tf.multiply(same_label_diff_model_sifter, querys_to_supports_dist), axis=1) / SLDMS_mean
             same_modal_diff_label_dist = (modal_sifter-same_label_modal) * querys_to_supports_dist
             mean_matrix = tf.matmul((modal_sifter-same_label_modal), s_label)
             mean_matrix = (mean_matrix + 0.00000000001*tf.ones_like(mean_matrix))
@@ -379,11 +382,9 @@ def mse(pred, label):
 def xent(pred, label):
     # Note - with tf version <=0.12, this loss has incorrect 2nd derivatives
     return tf.nn.softmax_cross_entropy_with_logits(logits=pred, labels=label) / FLAGS.update_batch_size
-def category_loss(qxy, support_x, support_y, t):
+def category_loss(predict, query_y):
     with tf.name_scope('category_loss'):
-        query_x, query_y = qxy
-        pred = category_choose(query_x, support_x, support_y)
-        loss = mse(pred, query_y)
+        loss = mse(predict, query_y)
     return loss
 
 
