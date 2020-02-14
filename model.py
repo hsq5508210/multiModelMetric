@@ -3,7 +3,7 @@
 import tensorflow as tf
 import math
 from tensorflow.python.platform import flags
-from utils import conv_block, get_acc, loss_eps, category_choose, category_loss
+from utils import conv_block, get_acc, loss_eps, category_choose, category_loss, vectorlize, distance
 FLAGS = flags.FLAGS
 
 
@@ -14,7 +14,7 @@ class Model:
         self.output_dim = output_dim
         self.dim_hidden = FLAGS.filter_num
         self.neighbor_k = FLAGS.k_neighbor
-        self.lr = FLAGS.lr
+        self.lr = tf.convert_to_tensor(FLAGS.lr, dtype=tf.float32)
         self.w = FLAGS.loss_weight
         # self.sess = sess
         # if FLAGS.data_source == 'PACS':
@@ -57,6 +57,26 @@ class Model:
                 self.losses_eps = losses_eps = loss_eps(output_s, output_q, support_m, query_m, support_y,
                                                         query_y, FLAGS.margin)
                 return losses_eps, accurcy
+    def debuf_nan(self, output_q, output_s):
+        output_s = vectorlize(output_s)
+        output_q = vectorlize(output_q)
+        # dist = distance(output_q, output_s)
+        # res = tf.exp(-tf.matmul(dist, self.support_y))
+        # sum = tf.diag(1/tf.reduce_sum(res, axis=1))
+        # softmax = tf.matmul(sum, res)
+
+        # predict = category_choose(output_q, output_s, self.support_y)
+        # task_losses = self.loss_function(predict, self.query_y)
+        # losses_eps = loss_eps(output_s, output_q, self.support_m, self.query_m, self.support_y,
+        #                       self.query_y, FLAGS.margin)
+
+        losses, acc = self.get_loss((self.support_x, self.support_y, self.query_x, self.query_y, self.support_m, self.query_m))
+
+
+
+        return losses
+
+
     def predict_category(self, resuse=True):
         weights = self.weights
         support_x, support_y, query_x, query_y = self.support_x, self.support_y, self.query_x, self.query_y
@@ -124,9 +144,14 @@ class Model:
 
         if FLAGS.train:
             with tf.name_scope("loss"):
-                self.loss = loss = tf.reduce_sum(losses) / tf.to_float(FLAGS.query_num * FLAGS.model * FLAGS.way_num)
+                # self.loss = loss = tf.reduce_sum(losses) / tf.to_float(FLAGS.query_num * FLAGS.model * FLAGS.way_num)
+                self.loss = loss = tf.reduce_mean(losses)
             with tf.name_scope("compute_grad"):
-                optimizer = tf.train.AdamOptimizer(self.lr)
+                optimizer = tf.train.AdamOptimizer(learning_rate=self.lr)
+                # optimizer = tf.train.GradientDescentOptimizer(self.lr)
+                # optimizer = tf.train.AdadeltaOptimizer(self.lr)
+
+
                 self.gvs = gvs = optimizer.compute_gradients(loss)
                 with tf.name_scope("clip_grad"):
                     # if FLAGS.data_source == 'PACS':

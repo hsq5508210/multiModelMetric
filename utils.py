@@ -245,28 +245,42 @@ def distance(x, y):
             return res
         def cosine(x, y):
             with tf.name_scope("cosine"):
-                l2_x = tf.diag(tf.sqrt(tf.reduce_sum(tf.square(x), axis=1)))
-                l2_y = tf.diag(tf.sqrt(tf.reduce_sum(tf.square(y), axis=1)))
-                ip = inner_product(x, y)
-                res = tf.matmul(tf.matmul(l2_x, ip), l2_y)
+                x_2 = tf.reshape(1/tf.sqrt(tf.reduce_sum(x * x, axis=1)), (-1, 1))
+                y_2 = tf.reshape(1/tf.sqrt(tf.reduce_sum(y * y, axis=1)), (1, -1))
+                width = FLAGS.support_num*FLAGS.model*FLAGS.way_num
+                high = FLAGS.query_num*FLAGS.model*FLAGS.way_num
+                x_fill_op = tf.ones((1, width), dtype=tf.float32)
+                y_fill_op = tf.ones((high, 1), dtype=tf.float32)
+                ip = tf.matmul(x, tf.transpose(y))
+                res = tf.matmul(x_2, x_fill_op) * tf.matmul(y_fill_op, y_2) * ip
             return res
-        if FLAGS.distance_style == 'euc':
-            with tf.name_scope("inner_product"):
-                distance = tf.sqrt(tf.reduce_sum(tf.square(x-y), axis=1))
+        if FLAGS.distance_style == 'euc_v1':
+            # with tf.name_scope("euc"):
+            #     distance = tf.sqrt(tf.reduce_sum(tf.square(x-y), axis=1))
+            with tf.name_scope('euc_v1'):
+                x_2 = tf.reshape(tf.reduce_sum(x * x, axis=1), (-1, 1))
+                y_2 = tf.reshape(tf.reduce_sum(y * y, axis=1), (1, -1))
+                width = FLAGS.support_num*FLAGS.model*FLAGS.way_num
+                high = FLAGS.query_num*FLAGS.model*FLAGS.way_num
+                x_fill_op = tf.ones((1, width), dtype=tf.float32)
+                y_fill_op = tf.ones((high, 1), dtype=tf.float32)
+                xy = 2.0 * tf.matmul(x, tf.transpose(y))
+                distance = tf.sqrt(tf.matmul(x_2, x_fill_op) + tf.matmul(y_fill_op, y_2) - xy)
         elif FLAGS.distance_style == 'cosine':
             distance = -cosine(x, y)
         elif FLAGS.distance_style == 'inner_product':
             distance = inner_product(x, y)
+        # print("distance shape is:", distance.shape)
     return distance
 
 def loss_eps(support_x, query_x, s_modal, q_modal, s_label, q_label, margin):
     with tf.name_scope("loss_eps"):
         support_x = vectorlize(support_x)
         query_x = vectorlize(query_x)
-        if FLAGS.distance_style == 'euc':
-            querys_to_supports_dist = tf.map_fn(fn=lambda q: distance(q, support_x), elems=query_x, dtype=tf.float32)
-        elif FLAGS.distance_style == 'cosine':
-            querys_to_supports_dist = distance(query_x, support_x)
+        # if FLAGS.distance_style == 'euc':
+        #     querys_to_supports_dist = tf.map_fn(fn=lambda q: distance(q, support_x), elems=query_x, dtype=tf.float32)
+        # elif FLAGS.distance_style == 'cosine':
+        querys_to_supports_dist = distance(query_x, support_x)
         def sifter(matrix_query, matrix_support):
             return tf.matmul(matrix_query, tf.transpose(matrix_support))
         # choose the same modal and same label.
@@ -287,7 +301,7 @@ def loss_eps(support_x, query_x, s_modal, q_modal, s_label, q_label, margin):
             same_label_diff_model_dist = tf.reduce_max(same_label_diff_model_sifter * querys_to_supports_dist, axis=1)
             dist_smdl = (modal_sifter-same_label_modal) * querys_to_supports_dist
             min_idx = tf.cast(tf.reduce_sum(tf.matmul(tf.transpose(s_label), tf.transpose(modal_sifter-same_label_modal)), axis=1)[0]/ tf.reduce_sum(modal_sifter-same_label_modal, axis=1)[0], tf.int32)
-            group_by_label = tf.map_fn(fn=lambda x: tf.sort(x * tf.transpose(s_label)), elems=dist_smdl, dtype=tf.float32)[:, :, -min_idx]
+            group_by_label = tf.map_fn(fn=lambda x: tf.sort(x * tf.transpose(s_label)), elems=dist_smdl, dtype=tf.float32, parallel_iterations=FLAGS.model * FLAGS.way_num * FLAGS.query_num)[:, :, -min_idx]
         margin_exp_GBL = tf.reduce_sum(tf.exp(-group_by_label + tf.ones_like(group_by_label) * margin), axis=1)
         margin_exp_GBL = margin_exp_GBL - tf.exp(margin * tf.ones_like(margin_exp_GBL))
         exp_SLDM = tf.exp(-same_label_diff_model_dist)
@@ -331,11 +345,10 @@ def get_acc(pred, actual):
 
 def get_dist_category(x, y, y_onehot_label):
     with tf.name_scope("compute_distance_onehot"):
-        if FLAGS.distance_style == 'euc':
-            dist = tf.map_fn(fn=lambda x_: distance(x_, y), elems=x, dtype=tf.float32, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
-        elif FLAGS.distance_style == 'cosine':
-            dist = distance(x, y)
-        # res = tf.exp(-tf.reduce_sum(dist*y_onehot_label, axis=0))
+        # if FLAGS.distance_style == 'euc':
+        #     dist = tf.map_fn(fn=lambda x_: distance(x_, y), elems=x, dtype=tf.float32, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
+        # elif FLAGS.distance_style == 'cosine':
+        dist = distance(x, y)
         res = tf.exp(-tf.matmul(dist, y_onehot_label))
         sum = tf.diag(1/tf.reduce_sum(res, axis=1))
         softmax = tf.matmul(sum, res)

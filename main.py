@@ -29,7 +29,7 @@ flags.DEFINE_integer("k_neighbor", default=1, help="the number of k-nearest neig
 flags.DEFINE_integer("input_dim", default=3, help="input image channels.")
 flags.DEFINE_string("backbone", default="Conv", help="Model name.")
 flags.DEFINE_integer("filter_num", default=64, help="Model name.")
-flags.DEFINE_string("distance_style", default="euc", help="how to compute the distance.")
+flags.DEFINE_string("distance_style", default="euc_v1", help="how to compute the distance.")
 flags.DEFINE_bool("max_pool", default=True, help="use maxpool or not.")
 flags.DEFINE_string("norm", default="None", help="choose norm style.")
 flags.DEFINE_float("margin", default=1.0, help="set the margin of the loss_eps.")
@@ -42,21 +42,26 @@ flags.DEFINE_bool("category_loss", default=True, help="category loss use or not.
 
 
 ##config train
-flags.DEFINE_integer("episode_tr", default=20, help="the total number of training episodes.")
+flags.DEFINE_integer("episode_tr", default=40, help="the total number of training episodes.")
 flags.DEFINE_integer("episode_val", default=50, help="the total number of evaluate episodes.")
 flags.DEFINE_integer("episode_ts", default=20, help="the total number of testing episodes.")
 flags.DEFINE_bool("load_ckpt", default=False, help="load check point or not.")
+flags.DEFINE_bool("save_ckpt", default=True, help="save check point or not.")
+
+flags.DEFINE_bool("debug_mode", default=False, help="debug or not.")
+
+
 flags.DEFINE_integer("test_batch_size", default=100, help="the test batch size.")
 flags.DEFINE_integer("support_num", default=1, help="Num of support per class per model.")
 flags.DEFINE_integer("query_num", default=1, help="Num of query per class per model.")
 flags.DEFINE_integer("way_num", default=5, help="the number of classify ways.")
 flags.DEFINE_integer("iteration", default=10000, help="iterations.")
-flags.DEFINE_float("lr", default=0.001, help="learning rate.")
+flags.DEFINE_float("lr", default=0.0001, help="learning rate.")
 flags.DEFINE_bool("train", default=True, help="Train or not.")
 flags.DEFINE_bool("lr_decay", default=True, help="lr_decay or not.")
 flags.DEFINE_bool("visualize", default=False, help="visualize or not.")
 flags.DEFINE_float("decay_rate", default=0.999, help="learning rate decay rate.")
-flags.DEFINE_string("model_path", default="/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_lossepshard_w0.3_cosine/5_1_5000_lossepshard_w0.3_cosine", help="model's path.")
+flags.DEFINE_string("model_path", default="/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_lossep_margin0.4_w0.3_euc/5_1_5000_losseps_margin0.4_w0.3_euc", help="model's path.")
 flags.DEFINE_string("loss_function", default="mse", help="choose loss function.")
 FLAGS = flags.FLAGS
 import os
@@ -77,7 +82,7 @@ def make_test_tast(test_tasks):
 
 def test_iteration(sess, model, bestacc, test_tasks, i, j):
     saver = tf.train.Saver()
-    if FLAGS.lr_decay: model.decay()
+    if FLAGS.lr_decay and i % 5 == 0 and i != 0: model.decay()
     test_acc, tl = 0.0, 0.0
     print("testing...")
     task_support_x = np.array([task['support_set'][0] for task in test_tasks]).astype(np.float)
@@ -103,7 +108,8 @@ def test_iteration(sess, model, bestacc, test_tasks, i, j):
     print("\nlearning rate is:", lr)
     if (ts_accurcy > bestacc):
         bestacc = ts_accurcy
-        saver.save(sess, FLAGS.model_path, global_step=i)
+        if FLAGS.save_ckpt:
+            saver.save(sess, FLAGS.model_path, global_step=i)
     return bestacc
 
 
@@ -144,14 +150,50 @@ def train(model, data_generator, test_tasks):
             if ((j+1)) % 5000 == 0:
                 bestacc = test_iteration(sess, model, bestacc, test_tasks, i, j)
         print("\nepoch %d train loss is %f, train acc is %f.\n"%(i+1,l/FLAGS.episode_tr, a/FLAGS.episode_tr))
+        if FLAGS.debug_mode:
+            task = all_task[0]
+            feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
+                        model.support_y: task['support_set'][1], model.query_y: task['query_set'][1],
+                        model.support_m: task['support_set'][2],  model.query_m: task['query_set'][2]}
+            # print(task['support_set'][0])
+            if i == 0:
+                with sess.as_default():
+                    output_s = sess.run(model.forward(model.support_x, model.weights, reuse=True), feed_dic)
+                    output_q = sess.run(model.forward(model.query_x, model.weights, reuse=True), feed_dic)
+                    # task_losses, losses_eps = dist1 = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
+                    losses = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
+            else:
+                with sess.as_default():
+                    output_s = sess.run(model.forward(model.support_x, model.weights, reuse=True), feed_dic)
+                    output_q = sess.run(model.forward(model.query_x, model.weights, reuse=True), feed_dic)
+                    # task_losses, losses_eps = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
+                    losses = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
+
+                    weight = sess.run(model.weights['conv1'], feed_dic)
+                    # print(weight)
+            print(losses)
+
+            # print(dist1-dist0)
+
+
+
         if np.isnan(l):
             task = all_task[0]
             feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
-                        model.support_y: task['support_set'][1], model.query_y: task['query_set'][1]}
+                        model.support_y: task['support_set'][1], model.query_y: task['query_set'][1],
+                        model.support_m: task['support_set'][2],  model.query_m: task['query_set'][2]}
 
             with sess.as_default():
-                out_put = sess.run([model.predict_category()], feed_dic)
-            print(out_put)
+                output_s = sess.run(model.forward(model.support_x, model.weights, reuse=True), feed_dic)
+                output_q = sess.run(model.forward(model.query_x, model.weights, reuse=True), feed_dic)
+                gvs = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
+                weight = sess.run(model.weights['conv1'], feed_dic)
+                # print(weight)
+                # print(output_s.shape)
+                # print(output_q.shape)
+                #
+                # # le = sess.run([model.predict_category()], feed_dic)
+                # print([grad for grad, var in gvs])
             break
         # test_iteration(sess, model, task_support_x, task_support_y, task_query_x, task_query_y)
 
