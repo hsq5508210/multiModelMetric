@@ -1,0 +1,10 @@
+python main.py --model_path=/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_logloss_euc --iteration=50 --episode_tr=5000 --episode_ts=500 --eps_loss=False
+
+
+python main.py --model_path=/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_logloss_lossep_margin0.2_w0.3_euc --iteration=50 --episode_tr=5000 --episode_ts=500 --margin=0.2 --loss_weight=0.3
+
+python main.py --model_path=/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_logloss_lossep_margin0.4_w0.5_scd_euc --same_class_dist=True --iteration=30 --episode_tr=5000 --episode_ts=500 --margin=0.4 --loss_weight=0.5
+
+python main.py --model_path=/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_logloss_lossep_margin0.4_w0.5_scd_euc --image_size=128 --same_class_dist=True --iteration=30 --episode_tr=5000 --episode_ts=500 --margin=0.4 --loss_weight=0.5
+
+python main.py --model_path=/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_logloss_sw_euc --iteration=30 --episode_tr=5000 --episode_ts=500 --eps_loss=False --support_weight=True --init_style=xavier

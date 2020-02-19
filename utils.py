@@ -195,7 +195,7 @@ def make_set_tensor(dict_set):
     n_ways = max(label_list) + 1
     labels = np.eye(n_ways)[label_list]
     modals = np.eye(m_modal)[modal_list]
-    img_batch = np.array([cv2.resize(cv2.imread(p),(FLAGS.image_size,FLAGS.image_size)) for p in file_name_list]).astype(np.float)/255.0
+    img_batch = np.array([cv2.resize(cv2.imread(p),(FLAGS.image_size, FLAGS.image_size)) for p in file_name_list]).astype(np.float)/255.0
     index = np.arange(img_batch.shape[0])
     #shuffle the sample.
     np.random.shuffle(index)
@@ -235,10 +235,16 @@ def normalize(inp, activation, scope, reuse):
                 return inp
 
 
-
-def distance(x, y):
+# loss function define
+def distance(x, y, sw=False):
     """different distance function."""
     with tf.name_scope("compute_distance"):
+        if sw:
+            width = FLAGS.way_num
+            high = FLAGS.support_num * FLAGS.model * FLAGS.way_num
+        else:
+            width = FLAGS.support_num * FLAGS.model * FLAGS.way_num
+            high = FLAGS.query_num * FLAGS.model * FLAGS.way_num
         def inner_product(x, y):
             with tf.name_scope("inner_product"):
                 res = tf.matmul(x, tf.transpose(y))
@@ -247,8 +253,6 @@ def distance(x, y):
             with tf.name_scope("cosine"):
                 x_2 = tf.reshape(1/tf.sqrt(tf.reduce_sum(x * x, axis=1)), (-1, 1))
                 y_2 = tf.reshape(1/tf.sqrt(tf.reduce_sum(y * y, axis=1)), (1, -1))
-                width = FLAGS.support_num*FLAGS.model*FLAGS.way_num
-                high = FLAGS.query_num*FLAGS.model*FLAGS.way_num
                 x_fill_op = tf.ones((1, width), dtype=tf.float32)
                 y_fill_op = tf.ones((high, 1), dtype=tf.float32)
                 ip = tf.matmul(x, tf.transpose(y))
@@ -260,8 +264,6 @@ def distance(x, y):
             with tf.name_scope('euc_v1'):
                 x_2 = tf.reshape(tf.reduce_sum(x * x, axis=1), (-1, 1))
                 y_2 = tf.reshape(tf.reduce_sum(y * y, axis=1), (1, -1))
-                width = FLAGS.support_num*FLAGS.model*FLAGS.way_num
-                high = FLAGS.query_num*FLAGS.model*FLAGS.way_num
                 x_fill_op = tf.ones((1, width), dtype=tf.float32)
                 y_fill_op = tf.ones((high, 1), dtype=tf.float32)
                 xy = 2.0 * tf.matmul(x, tf.transpose(y))
@@ -272,11 +274,16 @@ def distance(x, y):
             distance = inner_product(x, y)
         # print("distance shape is:", distance.shape)
     return distance
-
+def scd(support_x, query_x, s_label, q_label):
+    with tf.name_scope("same_class_distance"):
+        querys_to_supports_dist = distance(query_x, support_x)
+        same_label_sifer = tf.matmul(q_label, tf.transpose(s_label))
+        same_label_dist = tf.reduce_sum(querys_to_supports_dist * same_label_sifer, axis=1)
+        mean_matrix = tf.reduce_sum(same_label_sifer, axis=1)
+        res = same_label_dist/mean_matrix
+    return res
 def loss_eps(support_x, query_x, s_modal, q_modal, s_label, q_label, margin):
     with tf.name_scope("loss_eps"):
-        support_x = vectorlize(support_x)
-        query_x = vectorlize(query_x)
         # if FLAGS.distance_style == 'euc':
         #     querys_to_supports_dist = tf.map_fn(fn=lambda q: distance(q, support_x), elems=query_x, dtype=tf.float32)
         # elif FLAGS.distance_style == 'cosine':
@@ -379,11 +386,9 @@ def vectorlize(x):
         size = math.floor(FLAGS.image_size/(2**4))
         x = tf.reshape(tensor=x, shape=[-1, size*size*FLAGS.filter_num])
     return x
+
 def category_choose(output_q, output_s, label_s):
     with tf.name_scope('category_choose'):
-
-        output_s = vectorlize(output_s)
-        output_q = vectorlize(output_q)
         with tf.name_scope('category'):
             # softmax = tf.map_fn(fn=lambda q: get_dist_category(q, output_s, label_s), elems=output_q, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num, dtype=tf.float32)
             softmax = get_dist_category(output_q, output_s, label_s)
@@ -391,15 +396,44 @@ def category_choose(output_q, output_s, label_s):
 ## Loss functions
 def mse(pred, label):
     return tf.reduce_mean(tf.square(pred-label), axis=1)
+def log_liklyhood(pred, label):
+    with tf.name_scope('log_category_loss'):
+        res = tf.reduce_sum(-tf.log(tf.reduce_sum(pred * label, axis=1)))
+    return res
+
 
 def xent(pred, label):
     # Note - with tf version <=0.12, this loss has incorrect 2nd derivatives
     return tf.nn.softmax_cross_entropy_with_logits(logits=pred, labels=label) / FLAGS.update_batch_size
 def category_loss(predict, query_y):
-    with tf.name_scope('category_loss'):
+    with tf.name_scope('mse_category_loss'):
         loss = mse(predict, query_y)
     return loss
 
+def get_prototype(support_x, s_label):
+    with tf.name_scope("get_prototype"):
+        mean_matrix = tf.diag(1/tf.reduce_sum(s_label, axis=0))
+        prototypes = tf.matmul(mean_matrix, tf.matmul(tf.transpose(s_label), support_x))
+    return prototypes
+def support_weight(support_x, s_label):
+    with tf.name_scope("support_weight"):
+        prototypes = get_prototype(support_x, s_label)
+        sample_to_proto_dist = tf.reshape(tf.exp(tf.reduce_sum(-distance(support_x, prototypes, sw=True) * (2*s_label-tf.ones_like(s_label)), axis=1)), (-1, 1))
+        class_sum = tf.reshape(tf.transpose(tf.matmul(tf.transpose(s_label), sample_to_proto_dist)), (-1, 1))
+        sum_up = tf.matmul(s_label, class_sum)
+        weights = sample_to_proto_dist / sum_up
+    return weights * support_x
+def inter_var(support_x, s_label):
+    with tf.name_scope("intra_var"):
+        prototypes = get_prototype(support_x, s_label)
+        center_point = tf.reduce_mean(prototypes, axis=0)
+        vars = tf.reduce_mean(tf.sqrt(tf.square(center_point-prototypes)))
+    return vars
+def intra_var(support_x, s_label):
+    with tf.name_scope("intra_var"):
+        prototypes = get_prototype(support_x, s_label)
+        vars = tf.reduce_mean(tf.reduce_sum(distance(support_x, prototypes, sw=True) * s_label, axis=1))
+    return vars
 
 def compute_loss(qxy, support_x, support_y, t=1.0):
     """comput distance based loss.
@@ -408,8 +442,6 @@ def compute_loss(qxy, support_x, support_y, t=1.0):
     """
     with tf.name_scope("distance_loss"):
         query_x, query_y = qxy
-        support_x = vectorlize(support_x)
-        query_x = vectorlize(query_x)
         weights = get_weights_diag_matrix(support_x, support_y)
         dist = distance(query_x, support_x)
         intrad = intra_dist(dist, weights, query_y, support_y)

@@ -2,6 +2,7 @@
 from tensorflow.python import debug as tf_debug
 from tensorflow.python.platform import flags
 from data_generator import DataGenerator
+import pandas as pd
 from model import Model
 import numpy as np
 import tensorflow as tf
@@ -37,6 +38,17 @@ flags.DEFINE_float("loss_weight", default=0.5, help="set the weight of the loss.
 flags.DEFINE_bool("eps_usehard", default=False, help="eps use hard or not.")
 flags.DEFINE_bool("eps_loss", default=True, help="eps use or not.")
 flags.DEFINE_bool("category_loss", default=True, help="category loss use or not.")
+flags.DEFINE_bool("same_class_dist", default=False, help="turn on class dist loss use or not.")
+flags.DEFINE_string("init_style", default='normal', help="how to initialize weight parameters.")
+# flags.DEFINE_bool("pop", default=True, help="conv pop or not.")
+flags.DEFINE_bool("support_weight", default=False, help="use support weight or not.")
+flags.DEFINE_bool("intra_var", default=False, help="use intra weight or not.")
+flags.DEFINE_bool("inter_var", default=False, help="use inter var weight or not.")
+
+
+
+
+
 
 
 
@@ -59,13 +71,16 @@ flags.DEFINE_integer("iteration", default=10000, help="iterations.")
 flags.DEFINE_float("lr", default=0.0001, help="learning rate.")
 flags.DEFINE_bool("train", default=True, help="Train or not.")
 flags.DEFINE_bool("lr_decay", default=True, help="lr_decay or not.")
+flags.DEFINE_integer("decay_iteration", default=5, help="lr_decay or not.")
 flags.DEFINE_bool("visualize", default=False, help="visualize or not.")
-flags.DEFINE_float("decay_rate", default=0.999, help="learning rate decay rate.")
+flags.DEFINE_float("decay_rate", default=0.05, help="learning rate decay rate.")
 flags.DEFINE_string("model_path", default="/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_lossep_margin0.4_w0.3_euc/5_1_5000_losseps_margin0.4_w0.3_euc", help="model's path.")
-flags.DEFINE_string("loss_function", default="mse", help="choose loss function.")
+flags.DEFINE_string("loss_function", default="log", help="choose loss function.")
 FLAGS = flags.FLAGS
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+loss_line = {'train_loss': [], 'train_accu': [], 'test_accu': []}
+
 
 def visualize(sess, graph=False):
     if graph:
@@ -82,7 +97,7 @@ def make_test_tast(test_tasks):
 
 def test_iteration(sess, model, bestacc, test_tasks, i, j):
     saver = tf.train.Saver()
-    if FLAGS.lr_decay and i % 5 == 0 and i != 0: model.decay()
+    if FLAGS.lr_decay and i % 5 == 0 and i != 0: model.decay(i)
     test_acc, tl = 0.0, 0.0
     print("testing...")
     task_support_x = np.array([task['support_set'][0] for task in test_tasks]).astype(np.float)
@@ -104,23 +119,27 @@ def test_iteration(sess, model, bestacc, test_tasks, i, j):
         test_acc += sum(acc)
         # tl += test_loss
     ts_accurcy = test_acc / FLAGS.episode_ts
-    print("\nepoch %d  test acc is %f." % ((i + 1) * (j + 1), ts_accurcy))
+    print("\nepoch %d  test acc is %f." % ((i + 1), ts_accurcy))
+    loss_line['test_accu'].append(ts_accurcy)
     print("\nlearning rate is:", lr)
     if (ts_accurcy > bestacc):
         bestacc = ts_accurcy
         if FLAGS.save_ckpt:
-            saver.save(sess, FLAGS.model_path, global_step=i)
+            if not os.path.exists(FLAGS.model_path):
+                os.makedirs(FLAGS.model_path)
+            saver.save(sess, FLAGS.model_path + '/model', global_step=i)
     return bestacc
 
 
 
 def train(model, data_generator, test_tasks):
     sess = tf.InteractiveSession()
-    tasks_path = [p for p in os.listdir(FLAGS.meta_data_path) if str(FLAGS.episode_tr) in p]
+    tasks_path = [p for p in os.listdir(FLAGS.meta_data_path) if str(FLAGS.episode_tr)+'tasks_'+str(FLAGS.image_size)+'_'+str(FLAGS.support_num)+'shot' in p]
     if len(os.listdir(FLAGS.meta_data_path)) == 0 or len(tasks_path) == 0:
         all_task = data_generator.make_data_tensor()
-        np.save(FLAGS.meta_data_path+'/'+str(FLAGS.episode_tr) +'_tasks.npy', all_task)
+        np.save(FLAGS.meta_data_path+'/'+str(FLAGS.episode_tr)+'tasks_'+str(FLAGS.image_size)+'_'+str(FLAGS.support_num)+'shot' +'.npy', all_task, allow_pickle=True)
     else:
+        print(tasks_path[0])
         all_task = np.load(os.path.join(FLAGS.meta_data_path, tasks_path[0]), allow_pickle=True)
     trainop, acc_loss = model.trainop()
     tf.global_variables_initializer().run()
@@ -147,9 +166,11 @@ def train(model, data_generator, test_tasks):
                 visualize(sess, graph=True)
             l += la[0]
             a += la[1]
-            if ((j+1)) % 5000 == 0:
-                bestacc = test_iteration(sess, model, bestacc, test_tasks, i, j)
+            # if ((j+1)) % 5000 == 0:
+        bestacc = test_iteration(sess, model, bestacc, test_tasks, i, j)
         print("\nepoch %d train loss is %f, train acc is %f.\n"%(i+1,l/FLAGS.episode_tr, a/FLAGS.episode_tr))
+        loss_line['train_loss'].append(l/FLAGS.episode_tr)
+        loss_line['train_accu'].append(a/FLAGS.episode_tr)
         if FLAGS.debug_mode:
             task = all_task[0]
             feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
@@ -194,27 +215,14 @@ def train(model, data_generator, test_tasks):
                 #
                 # # le = sess.run([model.predict_category()], feed_dic)
                 # print([grad for grad, var in gvs])
+            # np.savetxt(os.path.join(FLAGS.model_path, 'loss_acc.csv'), np.array(loss_line))
+            pd.DataFrame(loss_line).to_csv(os.path.join(FLAGS.model_path, 'loss_acc.csv'))
             break
         # test_iteration(sess, model, task_support_x, task_support_y, task_query_x, task_query_y)
 
+    # np.savetxt(os.path.join(FLAGS.model_path, 'loss_acc.csv'), np.array(loss_line))
+    pd.DataFrame(loss_line).to_csv(os.path.join(FLAGS.model_path, 'loss_acc.csv'))
 
-
-
-def test(model, data_generator):
-    sess = tf.InteractiveSession()
-    saver = tf.train.Saver()
-    all_test_task = data_generator.make_data_tensor()
-    l, a = 0, 0
-    for j in tqdm(range(FLAGS.episode)):
-        task = all_test_task[j]
-        feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
-                    model.support_y: task['support_set'][1], model.query_y: task['query_set'][1]}
-        with sess.as_default():
-            saver.restore(sess, FLAGS.model_path)
-            la = sess.run(model.get_loss(task, model.weights), feed_dic)
-            l += la[0]
-            a += la[1]
-    print("\n test loss is %f, acc is %f" % (l / FLAGS.episode, a / FLAGS.episode))
 
 import multiprocessing
 def main():

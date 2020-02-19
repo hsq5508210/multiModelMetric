@@ -132,14 +132,35 @@ def loss_eps(support_x, query_x, s_modal, q_modal, s_label, q_label, margin):
         loss_eps = -tf.log(exp_SLDM / (margin_exp_GBL + exp_SLDM))
     return loss_eps
 
-with tf.Session() as sess:
-    pred = get_dist_category(q_test, s_test, s_label)
-    le = loss_eps(s_test, q_test, s_modal, q_modal, s_label, q_label, 0.4)
-    lc = category_loss(pred, q_label)
-    print(pred.eval())
-    print(le.eval())
-    print(lc.eval())
 
+def scd(support_x, query_x, s_label, q_label):
+    with tf.name_scope("same_class_distance"):
+        querys_to_supports_dist = distance(query_x, support_x)
+        same_label_sifer = tf.matmul(q_label, tf.transpose(s_label))
+        same_label_dist = tf.reduce_sum(querys_to_supports_dist * same_label_sifer, axis=1)
+        mean_matrix = tf.reduce_sum(same_label_sifer, axis=1)
+        res = same_label_dist/mean_matrix
+    return res
+def get_prototype(support_x, s_label):
+    with tf.name_scope("get_prototype"):
+        mean_matrix = tf.diag(1/tf.reduce_sum(s_label, axis=0))
+        prototypes = tf.matmul(mean_matrix, tf.matmul(tf.transpose(s_label), support_x))
+    return prototypes
+def support_weight(support_x, s_label):
+    with tf.name_scope("support_weight"):
+        prototypes = get_prototype(support_x, s_label)
+        sample_to_proto_dist = tf.reshape(tf.exp(tf.reduce_sum(-distance_v1(support_x, prototypes) * (2*s_label-tf.ones_like(s_label)), axis=1)), (-1, 1))
+        class_sum = tf.reshape(tf.transpose(tf.matmul(tf.transpose(s_label), sample_to_proto_dist)), (-1, 1))
+        sum_up = tf.matmul(s_label, class_sum)
+        weights = sample_to_proto_dist / sum_up
+    return weights * support_x
+
+
+
+
+with tf.Session() as sess:
+    w = support_weight(s_test, s_label)
+    print(w.eval())
     # cos = sess.run(cosine(query_x, support_x))
     # print(loss1-loss2)
 
