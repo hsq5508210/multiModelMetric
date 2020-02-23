@@ -3,7 +3,7 @@
 import tensorflow as tf
 import math
 from tensorflow.python.platform import flags
-from utils import conv_block, get_acc, loss_eps, category_choose, category_loss, vectorlize, log_liklyhood, scd, support_weight, intra_var, inter_var
+from utils import conv_block, get_acc, loss_eps, category_choose, category_loss, vectorlize, log_liklyhood, scd, support_weight, intra_var, inter_var, loss_eps_p
 FLAGS = flags.FLAGS
 
 
@@ -29,6 +29,12 @@ class Model:
             self.loss_function = category_loss
         elif FLAGS.loss_function == 'log':
             self.loss_function = log_liklyhood
+        if FLAGS.prototype:
+            self.eps = loss_eps_p
+        else:
+            self.eps = loss_eps
+
+
     def decay(self, i):
         iter = FLAGS.decay_iteration
         decay_rate = FLAGS.decay_rate
@@ -51,12 +57,13 @@ class Model:
             #                         parallel_iterations=FLAGS.model * FLAGS.way_num * FLAGS.query_num)
             # task_losses = self.loss_function((output_q, query_y), output_s, support_y)
             task_losses = self.loss_function(predict, query_y)
+            # print("task_losses shape is:", task_losses.shape)
             if FLAGS.intra_var:
                 task_losses = task_losses + intra_var(output_s, support_y) * 0.1 * tf.ones(shape=(FLAGS.model * FLAGS.way_num * FLAGS.query_num))
                 if FLAGS.inter_var:
                     task_losses = task_losses + (intra_var(output_s, support_y)/inter_var(output_s, support_y)) * 0.1 * tf.ones(shape=(FLAGS.model * FLAGS.way_num * FLAGS.query_num))
             if FLAGS.eps_loss and FLAGS.category_loss:
-                self.losses_eps = losses_eps = loss_eps(output_s, output_q, support_m, query_m, support_y,
+                self.losses_eps = losses_eps = self.eps(output_s, output_q, support_m, query_m, support_y,
                                       query_y, FLAGS.margin)
                 losses = (1 - self.w) * task_losses + self.w * losses_eps
                 if not FLAGS.same_class_dist:
@@ -72,9 +79,7 @@ class Model:
                 self.losses_eps = losses_eps = loss_eps(output_s, output_q, support_m, query_m, support_y,
                                                         query_y, FLAGS.margin)
                 return losses_eps, accurcy
-    def debuf_nan(self, output_q, output_s):
-        output_s = vectorlize(output_s)
-        output_q = vectorlize(output_q)
+    def debuf_nan(self, resuse=True):
         # dist = distance(output_q, output_s)
         # res = tf.exp(-tf.matmul(dist, self.support_y))
         # sum = tf.diag(1/tf.reduce_sum(res, axis=1))
@@ -85,11 +90,17 @@ class Model:
         # losses_eps = loss_eps(output_s, output_q, self.support_m, self.query_m, self.support_y,
         #                       self.query_y, FLAGS.margin)
 
-        losses, acc = self.get_loss((self.support_x, self.support_y, self.query_x, self.query_y, self.support_m, self.query_m))
+        # losses, acc = self.get_loss((self.support_x, self.support_y, self.query_x, self.query_y, self.support_m, self.query_m))
+        weights = self.weights
+        support_x, support_y, query_x, query_y, support_m, query_m = self.support_x, self.support_y, self.query_x, self.query_y, self.support_m, self.query_m
+        output_s = vectorlize(self.forward(support_x, weights, reuse=resuse))
+        output_q = vectorlize(self.forward(query_x, weights, reuse=resuse))
+        losses_eps = self.eps(output_s, output_q, support_m, query_m, support_y,
+                              query_y, FLAGS.margin)
+        self.predict = predict = category_choose(output_q, output_s, support_y)
+        losses = self.loss_function(predict, query_y)
 
-
-
-        return losses
+        return [losses, losses_eps]
 
 
     def predict_category(self, resuse=True):
@@ -158,21 +169,22 @@ class Model:
 
     def trainop(self):
         losses, acc = self.get_loss((self.support_x, self.support_y, self.query_x, self.query_y, self.support_m, self.query_m))
-
+        # l = tf.is_nan(tf.reduce_sum(losses)).eval()
         if FLAGS.train:
             with tf.name_scope("loss"):
                 # self.loss = loss = tf.reduce_sum(losses) / tf.to_float(FLAGS.query_num * FLAGS.model * FLAGS.way_num)
                 self.loss = loss = tf.reduce_mean(losses)
             with tf.name_scope("compute_grad"):
-                optimizer = tf.train.AdamOptimizer(learning_rate=self.lr)
-                # optimizer = tf.train.GradientDescentOptimizer(self.lr)
-                # optimizer = tf.train.AdadeltaOptimizer(self.lr)
+                if FLAGS.optimizer == 'adam':
+                    optimizer = tf.train.AdamOptimizer(learning_rate=self.lr)
+                elif FLAGS.optimizer == 'sgd':
+                    optimizer = tf.train.GradientDescentOptimizer(learning_rate=self.lr)
 
 
                 self.gvs = gvs = optimizer.compute_gradients(loss)
                 with tf.name_scope("clip_grad"):
                     # if FLAGS.data_source == 'PACS':
-                    gvs = [(tf.clip_by_value(grad, -5, 5), var) for grad, var in gvs]
+                    gvs = [(tf.clip_by_value(grad, -0.1, 0.1), var) for grad, var in gvs]
                 self.train = optimizer.apply_gradients(gvs)
             self.acc = acc
         return self.train, [self.loss, acc]

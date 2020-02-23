@@ -5,8 +5,10 @@ from data_generator import DataGenerator
 import pandas as pd
 from model import Model
 import numpy as np
+import utils
 import tensorflow as tf
 import utils
+import math
 from tqdm import tqdm
 FLAGS = flags.FLAGS
 ##config dataset
@@ -44,6 +46,9 @@ flags.DEFINE_string("init_style", default='normal', help="how to initialize weig
 flags.DEFINE_bool("support_weight", default=False, help="use support weight or not.")
 flags.DEFINE_bool("intra_var", default=False, help="use intra weight or not.")
 flags.DEFINE_bool("inter_var", default=False, help="use inter var weight or not.")
+flags.DEFINE_bool("prototype", default=True, help="use prototype or not.")
+flags.DEFINE_string("optimizer", default='adam', help="how to optimize parameters.")
+
 
 
 
@@ -68,7 +73,7 @@ flags.DEFINE_integer("support_num", default=1, help="Num of support per class pe
 flags.DEFINE_integer("query_num", default=1, help="Num of query per class per model.")
 flags.DEFINE_integer("way_num", default=5, help="the number of classify ways.")
 flags.DEFINE_integer("iteration", default=10000, help="iterations.")
-flags.DEFINE_float("lr", default=0.0001, help="learning rate.")
+flags.DEFINE_float("lr", default=0.00005, help="learning rate.")
 flags.DEFINE_bool("train", default=True, help="Train or not.")
 flags.DEFINE_bool("lr_decay", default=True, help="lr_decay or not.")
 flags.DEFINE_integer("decay_iteration", default=5, help="lr_decay or not.")
@@ -76,9 +81,11 @@ flags.DEFINE_bool("visualize", default=False, help="visualize or not.")
 flags.DEFINE_float("decay_rate", default=0.05, help="learning rate decay rate.")
 flags.DEFINE_string("model_path", default="/data2/hsq/Project/multiModelMetric/log/model_checkpoint/mini-imagenet_5way_1shot_5000task_lossep_margin0.4_w0.3_euc/5_1_5000_losseps_margin0.4_w0.3_euc", help="model's path.")
 flags.DEFINE_string("loss_function", default="log", help="choose loss function.")
+flags.DEFINE_string("gpu", default="1", help="choose gpu.")
+
 FLAGS = flags.FLAGS
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = FLAGS.gpu
 loss_line = {'train_loss': [], 'train_accu': [], 'test_accu': []}
 
 
@@ -134,13 +141,22 @@ def test_iteration(sess, model, bestacc, test_tasks, i, j):
 
 def train(model, data_generator, test_tasks):
     sess = tf.InteractiveSession()
-    tasks_path = [p for p in os.listdir(FLAGS.meta_data_path) if str(FLAGS.episode_tr)+'tasks_'+str(FLAGS.image_size)+'_'+str(FLAGS.support_num)+'shot' in p]
+    data_name = str(FLAGS.episode_tr)+'tasks_'+str(FLAGS.query_num)+'q_'+str(FLAGS.image_size)+'_'+str(FLAGS.support_num)+'shot'
+    tasks_path = [p for p in os.listdir(FLAGS.meta_data_path) if data_name in p]
     if len(os.listdir(FLAGS.meta_data_path)) == 0 or len(tasks_path) == 0:
         all_task = data_generator.make_data_tensor()
-        np.save(FLAGS.meta_data_path+'/'+str(FLAGS.episode_tr)+'tasks_'+str(FLAGS.image_size)+'_'+str(FLAGS.support_num)+'shot' +'.npy', all_task, allow_pickle=True)
+        if FLAGS.episode_tr >500:
+            for i in range(math.ceil(len(all_task)/500)):
+                tasks = all_task[i*500:(i+1)*500]
+                np.save(FLAGS.meta_data_path+'/'+data_name + 'part'+str(i)+ '.npy', tasks, allow_pickle=True)
     else:
-        print(tasks_path[0])
-        all_task = np.load(os.path.join(FLAGS.meta_data_path, tasks_path[0]), allow_pickle=True)
+        print(tasks_path)
+        all_task=[]
+        for t in tasks_path:
+            all_task.extend(np.load(os.path.join(FLAGS.meta_data_path, t), allow_pickle=True))
+            # all_task.extend(np.load(os.path.join(FLAGS.meta_data_path, tasks_path[0]), allow_pickle=True))
+        print(len(all_task))
+
     trainop, acc_loss = model.trainop()
     tf.global_variables_initializer().run()
     print("training...")
@@ -151,48 +167,91 @@ def train(model, data_generator, test_tasks):
         tf.train.Saver().restore(sess, ckpt.model_checkpoint_path)
     for i in range(FLAGS.iteration):
         l, a = 0, 0
+        nan_index = []
         for j in tqdm(range(FLAGS.episode_tr)):
             task = all_task[j]
             feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
                         model.support_y: task['support_set'][1], model.query_y: task['query_set'][1],
                         model.support_m: task['support_set'][2],  model.query_m: task['query_set'][2]}
-            with sess.as_default():
-                _, la = sess.run([trainop, acc_loss], feed_dic)
-                # output_s = model.forward(model.support_x, model.weights, reuse=True)
-                # output_q = model.forward(model.query_x, model.weights, reuse=True)
 
-                # comloss = sess.run(utils.compute_loss((output_q, model.query_y), output_s, model.support_y), feed_dic)
+            with sess.as_default():
+                if FLAGS.debug_mode:
+
+                    loss, epsloss = sess.run(model.debuf_nan(), feed_dic)
+                    if np.isnan(np.sum(loss)) or np.isnan(np.sum(epsloss)):
+                        print("loss", loss)
+                        print("eps_loss", epsloss)
+                        if np.isnan(np.sum(epsloss)):
+                            output_s = sess.run(model.vectorlize(model.forward(model.support_x, model.weights, reuse=True)), feed_dic)
+                            output_q = sess.run(model.vectorlize(model.forward(model.query_x, model.weights, reuse=True)), feed_dic)
+                            modal_proto_type, p_modal, p_label = utils.support_label_modal_proto(model.vectorlize(model.forward(model.support_x, model.weights, reuse=True)), model.support_y, model.support_m)
+                            # querys_to_proto_dist = sess.run(utils.distance(model.vectorlize(model.forward(model.query_x, model.weights, reuse=True)), modal_proto_type), feed_dic)
+                            x = model.vectorlize(model.forward(model.query_x, model.weights, reuse=True))
+                            y = modal_proto_type
+                            x_2 = tf.reshape(tf.reduce_sum(x * x, axis=1), (-1, 1))
+                            y_2 = tf.reshape(tf.reduce_sum(y * y, axis=1), (1, -1))
+                            # x2_value, y2_value = sess.run([x_2, y_2], feed_dic)
+
+                            sw = ' '
+                            if sw == 'class_prototype':
+                                width = FLAGS.way_num
+                            else:
+                                width = FLAGS.way_num * FLAGS.model
+                            high = FLAGS.query_num * FLAGS.model * FLAGS.way_num
+                            x_fill_op = tf.ones((1, width), dtype=tf.float32)
+                            y_fill_op = tf.ones((high, 1), dtype=tf.float32)
+
+                            xy = 2.0 * tf.matmul(x, tf.transpose(y))
+                            xy_value = sess.run(xy, feed_dic)
+                            print(np.sum(xy_value))
+                            distance = tf.sqrt(tf.matmul(x_2, x_fill_op) + tf.matmul(y_fill_op, y_2) - xy)
+                            d = sess.run(distance, feed_dic)
+                            # print("x2xf",sess.run(tf.matmul(x_2, x_fill_op), feed_dic))
+                            # print("y2yf", sess.run(tf.matmul(y_fill_op, y_2), feed_dic))
+                            # print("xy", sess.run(xy, feed_dic))
+                            print('res', sess.run(tf.matmul(x_2, x_fill_op) + tf.matmul(y_fill_op, y_2) - xy, feed_dic))
+
+                            # print(d)
+                            # print(np.sum(d))
+
+
+                        exit(0)
+
+                _, la = sess.run([trainop, acc_loss], feed_dic)
+
+
+                    # if np.is_nan(la[0]):
+
             if(i == 0 and j == 0 and FLAGS.visualize):
                 visualize(sess, graph=True)
             l += la[0]
             a += la[1]
-            # if ((j+1)) % 5000 == 0:
         bestacc = test_iteration(sess, model, bestacc, test_tasks, i, j)
         print("\nepoch %d train loss is %f, train acc is %f.\n"%(i+1,l/FLAGS.episode_tr, a/FLAGS.episode_tr))
         loss_line['train_loss'].append(l/FLAGS.episode_tr)
         loss_line['train_accu'].append(a/FLAGS.episode_tr)
-        if FLAGS.debug_mode:
-            task = all_task[0]
-            feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
-                        model.support_y: task['support_set'][1], model.query_y: task['query_set'][1],
-                        model.support_m: task['support_set'][2],  model.query_m: task['query_set'][2]}
-            # print(task['support_set'][0])
-            if i == 0:
-                with sess.as_default():
-                    output_s = sess.run(model.forward(model.support_x, model.weights, reuse=True), feed_dic)
-                    output_q = sess.run(model.forward(model.query_x, model.weights, reuse=True), feed_dic)
-                    # task_losses, losses_eps = dist1 = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
-                    losses = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
-            else:
-                with sess.as_default():
-                    output_s = sess.run(model.forward(model.support_x, model.weights, reuse=True), feed_dic)
-                    output_q = sess.run(model.forward(model.query_x, model.weights, reuse=True), feed_dic)
-                    # task_losses, losses_eps = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
-                    losses = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
-
-                    weight = sess.run(model.weights['conv1'], feed_dic)
-                    # print(weight)
-            print(losses)
+        # if FLAGS.debug_mode:
+        #     task = all_task[0]
+        #     feed_dic = {model.support_x: task['support_set'][0], model.query_x: task['query_set'][0],
+        #                 model.support_y: task['support_set'][1], model.query_y: task['query_set'][1],
+        #                 model.support_m: task['support_set'][2],  model.query_m: task['query_set'][2]}
+        #     # print(task['support_set'][0])
+        #     if i == 0:
+        #         with sess.as_default():
+        #             output_s = sess.run(model.forward(model.support_x, model.weights, reuse=True), feed_dic)
+        #             output_q = sess.run(model.forward(model.query_x, model.weights, reuse=True), feed_dic)
+        #             # task_losses, losses_eps = dist1 = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
+        #             losses = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
+        #     else:
+        #         with sess.as_default():
+        #             output_s = sess.run(model.forward(model.support_x, model.weights, reuse=True), feed_dic)
+        #             output_q = sess.run(model.forward(model.query_x, model.weights, reuse=True), feed_dic)
+        #             # task_losses, losses_eps = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
+        #             losses = sess.run(model.debuf_nan(output_q, output_s), feed_dic)
+        #
+        #             weight = sess.run(model.weights['conv1'], feed_dic)
+        #             # print(weight)
+        #     print(losses)
 
             # print(dist1-dist0)
 
@@ -218,9 +277,8 @@ def train(model, data_generator, test_tasks):
             # np.savetxt(os.path.join(FLAGS.model_path, 'loss_acc.csv'), np.array(loss_line))
             pd.DataFrame(loss_line).to_csv(os.path.join(FLAGS.model_path, 'loss_acc.csv'))
             break
-        # test_iteration(sess, model, task_support_x, task_support_y, task_query_x, task_query_y)
 
-    # np.savetxt(os.path.join(FLAGS.model_path, 'loss_acc.csv'), np.array(loss_line))
+    np.savetxt(os.path.join(FLAGS.model_path, 'loss_acc.csv'), np.array(loss_line))
     pd.DataFrame(loss_line).to_csv(os.path.join(FLAGS.model_path, 'loss_acc.csv'))
 
 
@@ -234,8 +292,8 @@ def main():
     model.construct_model()
     if FLAGS.train :
         train(model, data_generator, test_tasks)
-    else:
-        test(model, data_generator)
+    # else:
+    #     test(model, data_generator)
     exit(0)
 
 

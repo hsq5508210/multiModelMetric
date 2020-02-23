@@ -209,6 +209,7 @@ def make_set_tensor(dict_set):
 
 
 ## Network helpers
+##tf.nn.leaky_relu
 def conv_block(inp, cweight, bweight, scope, reuse, activation=tf.nn.leaky_relu, max_pool_pad='VALID', residual=False):
     """ Perform, conv, batch norm, nonlinearity, and max pool """
     stride, no_stride = [1,2,2,1], [1,1,1,1]
@@ -221,7 +222,7 @@ def conv_block(inp, cweight, bweight, scope, reuse, activation=tf.nn.leaky_relu,
         if FLAGS.max_pool:
             normed = tf.nn.max_pool(normed, stride, stride, max_pool_pad)
     return normed
-
+# tf.add
 def normalize(inp, activation, scope, reuse):
     with tf.name_scope("normalize"):
         if FLAGS.norm == 'batch_norm':
@@ -236,12 +237,18 @@ def normalize(inp, activation, scope, reuse):
 
 
 # loss function define
-def distance(x, y, sw=False):
+def distance(x, y, sw=None):
     """different distance function."""
     with tf.name_scope("compute_distance"):
-        if sw:
+        if sw == 'weight':
             width = FLAGS.way_num
             high = FLAGS.support_num * FLAGS.model * FLAGS.way_num
+        elif FLAGS.prototype:
+            if sw == 'class_prototype':
+                width = FLAGS.way_num
+            else:
+                width = FLAGS.way_num * FLAGS.model
+            high = FLAGS.query_num * FLAGS.model * FLAGS.way_num
         else:
             width = FLAGS.support_num * FLAGS.model * FLAGS.way_num
             high = FLAGS.query_num * FLAGS.model * FLAGS.way_num
@@ -259,15 +266,14 @@ def distance(x, y, sw=False):
                 res = tf.matmul(x_2, x_fill_op) * tf.matmul(y_fill_op, y_2) * ip
             return res
         if FLAGS.distance_style == 'euc_v1':
-            # with tf.name_scope("euc"):
-            #     distance = tf.sqrt(tf.reduce_sum(tf.square(x-y), axis=1))
             with tf.name_scope('euc_v1'):
                 x_2 = tf.reshape(tf.reduce_sum(x * x, axis=1), (-1, 1))
                 y_2 = tf.reshape(tf.reduce_sum(y * y, axis=1), (1, -1))
                 x_fill_op = tf.ones((1, width), dtype=tf.float32)
                 y_fill_op = tf.ones((high, 1), dtype=tf.float32)
                 xy = 2.0 * tf.matmul(x, tf.transpose(y))
-                distance = tf.sqrt(tf.matmul(x_2, x_fill_op) + tf.matmul(y_fill_op, y_2) - xy)
+                res = tf.matmul(x_2, x_fill_op) + tf.matmul(y_fill_op, y_2) - xy
+                distance = tf.sqrt(tf.nn.relu(tf.matmul(x_2, x_fill_op) + tf.matmul(y_fill_op, y_2) - xy) + tf.ones_like(res)*0.000001)
         elif FLAGS.distance_style == 'cosine':
             distance = -cosine(x, y)
         elif FLAGS.distance_style == 'inner_product':
@@ -282,6 +288,83 @@ def scd(support_x, query_x, s_label, q_label):
         mean_matrix = tf.reduce_sum(same_label_sifer, axis=1)
         res = same_label_dist/mean_matrix
     return res
+
+def support_label_modal_proto(support_x, support_y, support_m):
+    with tf.name_scope("support_label_modal_prototype"):
+        sifter = tf.map_fn(lambda sm: tf.matmul(tf.reshape(sm, (-1, 1)), tf.ones((1, 5)))*support_y, elems=tf.transpose(support_m),
+                           dtype=tf.float32, parallel_iterations=FLAGS.model)
+        modal_proto_type = tf.map_fn(lambda x: tf.matmul(tf.diag(1/tf.reduce_sum(x, axis=0)), tf.matmul(tf.transpose(x), support_x)), elems=sifter,
+                                     dtype=tf.float32, parallel_iterations=FLAGS.model)
+        modal = tf.map_fn(lambda m: tf.matmul(tf.ones((5, 1)), tf.reshape(m, (1, -1))), elems=tf.diag(tf.ones((FLAGS.model))), dtype=tf.float32, parallel_iterations=FLAGS.model)
+        label = tf.tile(tf.diag(tf.ones_like(support_y[0])), (FLAGS.model, 1))
+    return tf.reshape(modal_proto_type, (FLAGS.way_num * FLAGS.model, -1)), \
+           tf.reshape(modal, (FLAGS.way_num * FLAGS.model, -1)), \
+           tf.reshape(label, (FLAGS.way_num * FLAGS.model, -1))
+def get_prototype(support_x, s_label):
+    with tf.name_scope("compute_prototype"):
+        mean_matrix = tf.diag(1/tf.reduce_sum(s_label, axis=0))
+        prototypes = tf.matmul(mean_matrix, tf.matmul(tf.transpose(s_label), support_x))
+    return prototypes
+
+def support_weight(support_x, s_label):
+    with tf.name_scope("support_weight"):
+        prototypes = get_prototype(support_x, s_label)
+        sample_to_proto_dist = tf.reshape(tf.exp(tf.reduce_sum(-distance(support_x, prototypes, sw=True) * (2*s_label-tf.ones_like(s_label)), axis=1)), (-1, 1))
+        class_sum = tf.reshape(tf.transpose(tf.matmul(tf.transpose(s_label), sample_to_proto_dist)), (-1, 1))
+        sum_up = tf.matmul(s_label, class_sum)
+        weights = sample_to_proto_dist / sum_up
+    return weights * support_x
+
+
+def category_choose(output_q, output_s, label_s):
+    with tf.name_scope('category_choose'):
+        with tf.name_scope('category'):
+            if FLAGS.prototype:
+                prototypes = get_prototype(output_s, label_s)
+                label_s = tf.diag(tf.ones(FLAGS.way_num))
+                softmax = get_dist_category(output_q, prototypes, label_s)
+            else:
+                softmax = get_dist_category(output_q, output_s, label_s)
+    return softmax
+
+def loss_eps_p(support_x, query_x, s_modal, q_modal, s_label, q_label, margin):
+    with tf.name_scope("loss_eps_prototype"):
+        modal_proto_type, p_modal, p_label = support_label_modal_proto(support_x, s_label, s_modal)
+        querys_to_proto_dist = distance(query_x, modal_proto_type)
+        def sifter(matrix_query, matrix_support):
+            return tf.matmul(matrix_query, tf.transpose(matrix_support))
+        # choose the same modal and same label.
+        modal_sifter = sifter(q_modal, p_modal)
+        label_sifter = sifter(q_label, p_label)
+        same_label_modal = modal_sifter * label_sifter
+        # apply on the distance matrix.
+        same_label_diff_model_sifter = label_sifter - same_label_modal
+        if not FLAGS.eps_usehard:
+            SLDMS_mean = tf.reduce_sum(same_label_diff_model_sifter, axis=1)
+            # print(tf.reduce_sum(same_label_diff_model_sifter * querys_to_supports_dist, axis=1).eval())
+            same_label_diff_model_dist = tf.reduce_sum(
+                tf.multiply(same_label_diff_model_sifter, querys_to_proto_dist), axis=1) / SLDMS_mean
+            same_modal_diff_label_dist = (modal_sifter - same_label_modal) * querys_to_proto_dist
+            mean_matrix = tf.matmul((modal_sifter - same_label_modal), p_label)
+            mean_matrix = (mean_matrix + 0.00000000001 * tf.ones_like(mean_matrix))
+            group_by_label = tf.matmul(same_modal_diff_label_dist, p_label) / mean_matrix
+        else:
+            same_label_diff_model_dist = tf.reduce_max(same_label_diff_model_sifter * querys_to_proto_dist, axis=1)
+            dist_smdl = (modal_sifter - same_label_modal) * querys_to_proto_dist
+            min_idx = tf.cast(
+                tf.reduce_sum(tf.matmul(tf.transpose(p_label), tf.transpose(modal_sifter - same_label_modal)), axis=1)[
+                    0] / tf.reduce_sum(modal_sifter - same_label_modal, axis=1)[0], tf.int32)
+            group_by_label = tf.map_fn(fn=lambda x: tf.sort(x * tf.transpose(p_label)), elems=dist_smdl,
+                                       dtype=tf.float32,
+                                       parallel_iterations=FLAGS.model * FLAGS.way_num * FLAGS.query_num)[:, :,
+                             -min_idx]
+        margin_exp_GBL = tf.reduce_sum(tf.exp(-group_by_label + tf.ones_like(group_by_label) * margin), axis=1)
+        margin_exp_GBL = margin_exp_GBL - tf.exp(margin * tf.ones_like(margin_exp_GBL))
+        exp_SLDM = tf.exp(-same_label_diff_model_dist)
+        loss_eps = -tf.log(exp_SLDM / (margin_exp_GBL + exp_SLDM))
+    return loss_eps
+
+
 def loss_eps(support_x, query_x, s_modal, q_modal, s_label, q_label, margin):
     with tf.name_scope("loss_eps"):
         # if FLAGS.distance_style == 'euc':
@@ -355,7 +438,7 @@ def get_dist_category(x, y, y_onehot_label):
         # if FLAGS.distance_style == 'euc':
         #     dist = tf.map_fn(fn=lambda x_: distance(x_, y), elems=x, dtype=tf.float32, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num)
         # elif FLAGS.distance_style == 'cosine':
-        dist = distance(x, y)
+        dist = distance(x, y, 'class_prototype')
         res = tf.exp(-tf.matmul(dist, y_onehot_label))
         sum = tf.diag(1/tf.reduce_sum(res, axis=1))
         softmax = tf.matmul(sum, res)
@@ -387,18 +470,15 @@ def vectorlize(x):
         x = tf.reshape(tensor=x, shape=[-1, size*size*FLAGS.filter_num])
     return x
 
-def category_choose(output_q, output_s, label_s):
-    with tf.name_scope('category_choose'):
-        with tf.name_scope('category'):
-            # softmax = tf.map_fn(fn=lambda q: get_dist_category(q, output_s, label_s), elems=output_q, parallel_iterations=FLAGS.model*FLAGS.way_num*FLAGS.query_num, dtype=tf.float32)
-            softmax = get_dist_category(output_q, output_s, label_s)
-    return softmax
+
 ## Loss functions
 def mse(pred, label):
     return tf.reduce_mean(tf.square(pred-label), axis=1)
 def log_liklyhood(pred, label):
     with tf.name_scope('log_category_loss'):
-        res = tf.reduce_sum(-tf.log(tf.reduce_sum(pred * label, axis=1)))
+        # res = tf.reduce_sum(-tf.log(tf.reduce_sum(pred * label, axis=1)))
+        res = -tf.log(tf.reduce_sum(pred * label, axis=1))
+
     return res
 
 
@@ -410,19 +490,7 @@ def category_loss(predict, query_y):
         loss = mse(predict, query_y)
     return loss
 
-def get_prototype(support_x, s_label):
-    with tf.name_scope("get_prototype"):
-        mean_matrix = tf.diag(1/tf.reduce_sum(s_label, axis=0))
-        prototypes = tf.matmul(mean_matrix, tf.matmul(tf.transpose(s_label), support_x))
-    return prototypes
-def support_weight(support_x, s_label):
-    with tf.name_scope("support_weight"):
-        prototypes = get_prototype(support_x, s_label)
-        sample_to_proto_dist = tf.reshape(tf.exp(tf.reduce_sum(-distance(support_x, prototypes, sw=True) * (2*s_label-tf.ones_like(s_label)), axis=1)), (-1, 1))
-        class_sum = tf.reshape(tf.transpose(tf.matmul(tf.transpose(s_label), sample_to_proto_dist)), (-1, 1))
-        sum_up = tf.matmul(s_label, class_sum)
-        weights = sample_to_proto_dist / sum_up
-    return weights * support_x
+
 def inter_var(support_x, s_label):
     with tf.name_scope("intra_var"):
         prototypes = get_prototype(support_x, s_label)
